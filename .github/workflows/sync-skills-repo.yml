@@ -23,14 +23,15 @@ jobs:
           fetch-depth: 1
           path: source
 
-      - name: Install SSH deploy key for keeperhub/agentic-wallet-skills
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SKILLS_REPO_DEPLOY_KEY }}
-
-      - name: Clone target repo
+      - name: Clone target repo via fine-grained PAT
+        # SKILLS_REPO_PUSH_TOKEN is a fine-grained PAT scoped to
+        # keeperhub/agentic-wallet-skills only, with contents:write + metadata:read.
+        # Deploy keys are disabled at the org level, so HTTPS-via-token is the
+        # supported cross-repo auth mechanism.
+        env:
+          TOKEN: ${{ secrets.SKILLS_REPO_PUSH_TOKEN }}
         run: |
-          git clone git@github.com:keeperhub/agentic-wallet-skills.git target
+          git clone "https://x-access-token:${TOKEN}@github.com/keeperhub/agentic-wallet-skills.git" target
 
       - name: Sync skill file
         run: |
