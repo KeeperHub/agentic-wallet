@@ -35,8 +35,9 @@ jobs:
 
       - name: Sync skill file
         run: |
-          mkdir -p target/skills
-          cp source/skill/keeperhub-wallet.skill.md target/skills/keeperhub-wallet.skill.md
+          mkdir -p target/skills/keeperhub-wallet
+          cp source/skill/keeperhub-wallet.skill.md target/skills/keeperhub-wallet/SKILL.md
+          rm -f target/skills/keeperhub-wallet.skill.md
           if [ -f source/README.md ]; then
             cp source/README.md target/README.md
           fi
@@ -47,7 +48,8 @@ jobs:
           git config user.name "keeperhub-bot"
           git config user.email "bot@keeperhub.com"
           TAG_NAME="${GITHUB_REF_NAME:-manual-dispatch}"
-          git add skills/keeperhub-wallet.skill.md
+          git add skills/keeperhub-wallet/SKILL.md
+          git add -u skills/keeperhub-wallet.skill.md 2>/dev/null || true
           [ -f README.md ] && git add README.md
           if git diff --cached --quiet; then
             echo "No changes to sync."
