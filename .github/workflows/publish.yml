@@ -1,0 +1,69 @@
+# Type: releaser | Publishes @keeperhub/wallet to npm on tag with OIDC trusted publishing.
+# Trigger: tags matching `@keeperhub/wallet@*` (e.g. `@keeperhub/wallet@0.1.0`).
+# Gates (all blocking): supply-chain-guard test + pnpm audit (runtime deps, high) + build + type-check + full test suite.
+# Note: `pnpm audit --prod` is the pnpm-workspace equivalent of `npm audit --omit=dev`.
+name: Publish @keeperhub/wallet
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Run all gates but skip the publish step'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.27.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20.x'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Supply-chain guard (DIST-03)
+        run: pnpm test -- tests/integration/supply-chain-guard.test.ts
+
+      - name: Audit runtime dependencies (fail on high/critical)
+        # pnpm audit --prod is the pnpm-workspace equivalent of npm audit --omit=dev
+        run: pnpm audit --prod --audit-level high
+
+      - name: Type check
+        run: pnpm type-check
+
+      - name: Build
+        run: pnpm build
+
+      - name: Full test suite
+        run: pnpm test
+
+      - name: Dry-run pack (inspect tarball contents)
+        run: pnpm pack --dry-run
+
+      - name: Publish to npm with provenance
+        if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false) }}
+        run: pnpm publish --provenance --access public --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ''

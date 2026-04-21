@@ -1,0 +1,58 @@
+# Type: distributor | Syncs packages/wallet/skill/keeperhub-wallet.skill.md to the public
+# keeperhub/agentic-wallet-skills GitHub repo so `npx skills add keeperhub/agentic-wallet-skills`
+# resolves to the latest tagged version of the skill file.
+# Trigger: same tag as publish-wallet.yml (tags matching `@keeperhub/wallet@*`).
+name: Sync skill to keeperhub/agentic-wallet-skills
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source repo
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+          path: source
+
+      - name: Install SSH deploy key for keeperhub/agentic-wallet-skills
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SKILLS_REPO_DEPLOY_KEY }}
+
+      - name: Clone target repo
+        run: |
+          git clone git@github.com:keeperhub/agentic-wallet-skills.git target
+
+      - name: Sync skill file
+        run: |
+          mkdir -p target/skills
+          cp source/skill/keeperhub-wallet.skill.md target/skills/keeperhub-wallet.skill.md
+          if [ -f source/README.md ]; then
+            cp source/README.md target/README.md
+          fi
+
+      - name: Commit and push
+        working-directory: target
+        run: |
+          git config user.name "keeperhub-bot"
+          git config user.email "bot@keeperhub.com"
+          TAG_NAME="${GITHUB_REF_NAME:-manual-dispatch}"
+          git add skills/keeperhub-wallet.skill.md
+          [ -f README.md ] && git add README.md
+          if git diff --cached --quiet; then
+            echo "No changes to sync."
+            exit 0
+          fi
+          git commit -m "sync: $TAG_NAME" -m "Syncs skill file from @keeperhub/wallet npm release."
+          git tag "$TAG_NAME" || true
+          git push origin HEAD:main
+          git push origin "$TAG_NAME" || true
