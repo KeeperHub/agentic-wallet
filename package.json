@@ -30,11 +30,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/keeperhub/agentic-wallet.git"
+    "url": "https://github.com/KeeperHub/agentic-wallet.git"
   },
   "homepage": "https://docs.keeperhub.com/ai-tools/agentic-wallet",
   "bugs": {
-    "url": "https://github.com/keeperhub/agentic-wallet/issues"
+    "url": "https://github.com/KeeperHub/agentic-wallet/issues"
   },
   "scripts": {
     "build": "tsup",
