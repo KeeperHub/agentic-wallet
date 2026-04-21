@@ -44,7 +44,8 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Supply-chain guard (DIST-03)
-        run: pnpm test -- tests/integration/supply-chain-guard.test.ts
+        # Filter directly via `vitest run <path>`; `pnpm test -- <path>` does not forward positionals.
+        run: pnpm exec vitest run tests/integration/supply-chain-guard.test.ts
 
       - name: Audit runtime dependencies (fail on high/critical)
         # pnpm audit --prod is the pnpm-workspace equivalent of npm audit --omit=dev
@@ -57,6 +58,8 @@ jobs:
         run: pnpm build
 
       - name: Full test suite
+        # Runs after build so execFile-based CLI integration tests can invoke bin/keeperhub-wallet.js
+        # which imports from dist/cli.js.
         run: pnpm test
 
       - name: Dry-run pack (inspect tarball contents)
