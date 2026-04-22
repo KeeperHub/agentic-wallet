@@ -3,6 +3,7 @@ import { KeeperHubClient } from "./client.js";
 import { type MppChallenge, parseMppChallenge } from "./mpp-detect.js";
 import { readWalletConfig } from "./storage.js";
 import { KeeperHubError, type WalletConfig } from "./types.js";
+import { extractKeeperHubWorkflowSlug } from "./workflow-slug.js";
 import { parseX402Challenge, type X402Challenge } from "./x402-detect.js";
 
 // Tempo mainnet chain id. Forwarded to /sign so the server routes MPP
@@ -116,9 +117,17 @@ export function createPaymentSigner(
     mpp: MppChallenge,
     wallet: WalletConfig
   ): Promise<Response> {
+    const slug = extractKeeperHubWorkflowSlug(response.url);
+    if (!slug.ok) {
+      throw new KeeperHubError(
+        "UNSUPPORTED_RECIPIENT",
+        `This wallet only signs payments for KeeperHub workflows. The 402 came from a URL that does not match /api/mcp/workflows/<slug>/call (reason: ${slug.reason}). See KEEP-311 for generic x402 support.`
+      );
+    }
     const client = clientFactory(wallet);
     const signature = await signOrPoll(client, {
       chain: "tempo",
+      workflowSlug: slug.slug,
       paymentChallenge: {
         kind: "mpp",
         serialized: mpp.serialized,
@@ -147,6 +156,14 @@ export function createPaymentSigner(
       );
     }
 
+    const slug = extractKeeperHubWorkflowSlug(x402.resource.url || response.url);
+    if (!slug.ok) {
+      throw new KeeperHubError(
+        "UNSUPPORTED_RECIPIENT",
+        `This wallet only signs payments for KeeperHub workflows. The 402 came from a URL that does not match /api/mcp/workflows/<slug>/call (reason: ${slug.reason}). See KEEP-311 for generic x402 support.`
+      );
+    }
+
     const now = Math.floor(Date.now() / 1000);
     const validAfter = now - VALID_AFTER_PAST_SLACK_SECONDS;
     const validBefore = now + accept.maxTimeoutSeconds;
@@ -155,6 +172,7 @@ export function createPaymentSigner(
     const client = clientFactory(wallet);
     const signature = await signOrPoll(client, {
       chain: "base",
+      workflowSlug: slug.slug,
       paymentChallenge: {
         kind: "x402",
         payTo: accept.payTo,

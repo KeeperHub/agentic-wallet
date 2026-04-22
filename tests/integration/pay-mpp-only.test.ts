@@ -10,7 +10,8 @@ const wallet: WalletConfig = {
   hmacSecret: "bb".repeat(32),
 };
 
-const RESOURCE_URL = "https://app.keeperhub.com/api/mcp/demo/mpp-call";
+const RESOURCE_URL =
+  "https://app.keeperhub.com/api/mcp/workflows/mpp-demo/call";
 const MPP_SIG = "mpp-credential-base64-payload";
 
 describe("paymentSigner.pay() -- PAY-02 MPP-only on Tempo USDC.e", () => {
@@ -24,10 +25,13 @@ describe("paymentSigner.pay() -- PAY-02 MPP-only on Tempo USDC.e", () => {
         async ({ request }) => {
           const body = (await request.json()) as {
             chain: string;
+            workflowSlug?: string;
             paymentChallenge: { kind: string };
           };
           signChainCalled = body.chain;
           expect(body.paymentChallenge.kind).toBe("mpp");
+          // v0.1.5: workflowSlug forwarded for server-side payTo binding.
+          expect(body.workflowSlug).toBe("mpp-demo");
           return HttpResponse.json({ signature: MPP_SIG });
         }
       ),
