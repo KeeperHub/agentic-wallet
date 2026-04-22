@@ -1,13 +1,13 @@
-// End-to-end for the `add` + `link` CLI subcommands driven through
-// runCli() directly rather than execFile. runCli() spawns no subprocess
-// so we can override process.exit/stdout/stderr and MSW can intercept
-// fetch() to mock /provision + /link responses.
+// End-to-end for the `add` CLI subcommand driven through runCli() directly
+// rather than execFile. runCli() spawns no subprocess so we can override
+// process.exit/stdout/stderr and MSW can intercept fetch() to mock
+// /provision responses. v0.1.4 removed the `link` subcommand (see KEEP-308).
 //
 // HOME override: beforeEach mkdtemps a fake $HOME and points process.env.HOME
 // at it; storage.ts re-reads homedir() per call so wallet.json lands inside
 // the tempdir. afterEach restores the original HOME.
 
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HttpResponse, http } from "msw";
@@ -23,23 +23,15 @@ type StoredWallet = {
 
 let fakeHome: string;
 let originalHome: string | undefined;
-let originalSessionCookie: string | undefined;
 
 beforeEach(async () => {
   originalHome = process.env.HOME;
-  originalSessionCookie = process.env.KH_SESSION_COOKIE;
   fakeHome = await mkdtemp(join(tmpdir(), "kh-cli-add-"));
   process.env.HOME = fakeHome;
 });
 
 afterEach(async () => {
   process.env.HOME = originalHome;
-  if (originalSessionCookie === undefined) {
-    // biome-ignore lint/performance/noDelete: env.X=undefined coerces to the string "undefined"; delete is required to truly unset
-    delete process.env.KH_SESSION_COOKIE;
-  } else {
-    process.env.KH_SESSION_COOKIE = originalSessionCookie;
-  }
   await rm(fakeHome, { recursive: true, force: true });
 });
 
@@ -92,7 +84,7 @@ function trapExit(): ExitTrap {
   };
 }
 
-describe("CLI add + link end-to-end", () => {
+describe("CLI add end-to-end", () => {
   it("`add` writes wallet.json with provisioned values from POST /provision", async () => {
     server.use(
       http.post("https://app.keeperhub.com/api/agentic-wallet/provision", () =>
@@ -138,37 +130,4 @@ describe("CLI add + link end-to-end", () => {
     expect(combined).not.toContain("ab".repeat(32));
   });
 
-  it("`link` without KH_SESSION_COOKIE exits 1 with actionable stderr", async () => {
-    // Seed a wallet.json so readWalletConfig succeeds
-    await mkdir(join(fakeHome, ".keeperhub"), { recursive: true });
-    await writeFile(
-      join(fakeHome, ".keeperhub", "wallet.json"),
-      JSON.stringify({
-        subOrgId: "so_x",
-        walletAddress: "0x000000000000000000000000000000000000000c",
-        hmacSecret: "cd".repeat(32),
-      })
-    );
-
-    // biome-ignore lint/performance/noDelete: env.X=undefined coerces to the string "undefined"; delete is required to truly unset
-    delete process.env.KH_SESSION_COOKIE;
-
-    const stdio = captureStdio();
-    const exit = trapExit();
-
-    try {
-      await runCli(["node", "cli", "link"]);
-    } catch (err) {
-      if (!(err as Error).message?.startsWith("EXIT_")) {
-        throw err;
-      }
-    } finally {
-      stdio.restore();
-      exit.restore();
-    }
-
-    expect(exit.codes).toContain(1);
-    const errOut = stdio.stderrChunks.join("");
-    expect(errOut).toContain("KH_SESSION_COOKIE");
-  });
 });

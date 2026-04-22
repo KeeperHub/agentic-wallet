@@ -1,8 +1,13 @@
-// CLI dispatcher for `npx @keeperhub/wallet <cmd>`. Ships 5 subcommands:
-// add (provision -- NO auth), link (HMAC + KH_SESSION_COOKIE dual-proof),
-// fund (pure string-build Coinbase Onramp + Tempo address), balance (Base
-// USDC + Tempo USDC.e), info (print subOrgId + walletAddress from
-// ~/.keeperhub/wallet.json).
+// CLI dispatcher for `npx @keeperhub/wallet <cmd>`. Ships 4 subcommands:
+// add (provision -- NO auth), fund (pure string-build Coinbase Onramp +
+// Tempo address), balance (Base USDC + Tempo USDC.e), info (print subOrgId
+// + walletAddress from ~/.keeperhub/wallet.json).
+//
+// v0.1.4 removed the `link` subcommand. /api/agentic-wallet/link still
+// exists server-side but the UX (copy-paste session cookie) was not fit
+// for real users; the server-approval ask tier that required linking
+// also collapsed into an inline ask in this release. See KEEP-307 and
+// KEEP-308 for the long-term design decisions.
 //
 // @security The HMAC secret written to wallet.json is NEVER printed to stdout
 // or stderr. `add` prints only subOrgId + walletAddress + the config path so
@@ -16,7 +21,6 @@
 import { Command } from "commander";
 import { checkBalance } from "./balance.js";
 import { fund } from "./fund.js";
-import { buildHmacHeaders } from "./hmac.js";
 import { installSkill } from "./skill-install.js";
 import {
   getWalletConfigPath,
@@ -111,54 +115,6 @@ async function cmdAdd(opts: { baseUrl?: string } = {}): Promise<void> {
   process.stdout.write(`config written to ${getWalletConfigPath()}\n`);
 }
 
-async function cmdLink(opts: { baseUrl?: string } = {}): Promise<void> {
-  const wallet = await readWalletConfig();
-  const baseUrl = resolveBaseUrl(opts.baseUrl);
-  const sessionCookie = process.env.KH_SESSION_COOKIE;
-  if (!sessionCookie) {
-    process.stderr.write(
-      "[keeperhub-wallet] link requires KH_SESSION_COOKIE env var.\n" +
-        "Sign in at app.keeperhub.com, copy the session cookie, and re-run with:\n" +
-        "  KH_SESSION_COOKIE='<cookie>' npx @keeperhub/wallet link\n"
-    );
-    process.exit(1);
-  }
-  const body = JSON.stringify({ subOrgId: wallet.subOrgId });
-  const headers = buildHmacHeaders(
-    wallet.hmacSecret,
-    "POST",
-    "/api/agentic-wallet/link",
-    wallet.subOrgId,
-    body
-  );
-  const response = await fetch(`${baseUrl}/api/agentic-wallet/link`, {
-    method: "POST",
-    headers: {
-      ...headers,
-      "content-type": "application/json",
-      cookie: sessionCookie,
-    },
-    body,
-  });
-  const json = (await response.json().catch(() => ({}))) as {
-    ok?: boolean;
-    already?: boolean;
-    error?: string;
-    code?: string;
-  };
-  if (!response.ok) {
-    process.stderr.write(
-      `[keeperhub-wallet] link failed: ${json.code ?? response.status}: ${json.error ?? ""}\n`
-    );
-    process.exit(1);
-  }
-  if (json.already) {
-    process.stdout.write("already linked\n");
-    return;
-  }
-  process.stdout.write("linked\n");
-}
-
 async function cmdFund(): Promise<void> {
   const wallet = await readWalletConfig();
   const out = fund(wallet.walletAddress);
@@ -195,16 +151,6 @@ export async function runCli(argv: string[] = process.argv): Promise<void> {
     .option("--base-url <url>", "KeeperHub API base URL")
     .action(async (opts: { baseUrl?: string }) => {
       await cmdAdd(opts);
-    });
-
-  program
-    .command("link")
-    .description(
-      "Link the current wallet to your KeeperHub account (requires KH_SESSION_COOKIE env)"
-    )
-    .option("--base-url <url>", "KeeperHub API base URL")
-    .action(async (opts: { baseUrl?: string }) => {
-      await cmdLink(opts);
     });
 
   program
