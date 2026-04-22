@@ -1,7 +1,5 @@
-import { KeeperHubClient } from "./client.js";
 import { loadSafetyConfig, type SafetyConfig } from "./safety-config.js";
-import { readWalletConfig } from "./storage.js";
-import type { HookDecision, WalletConfig } from "./types.js";
+import type { HookDecision } from "./types.js";
 
 type HookInput = {
   tool_name?: string;
@@ -12,22 +10,9 @@ export type CreateHookOptions = {
   /** Match against tool_name. Default: /keeperhub|wallet|sign/i */
   toolNameMatcher?: (name: string) => boolean;
   /** Injected for tests */
-  walletLoader?: () => Promise<WalletConfig>;
-  /** Injected for tests */
   configLoader?: () => Promise<SafetyConfig>;
-  /** Injected for tests */
-  clientFactory?: (w: WalletConfig) => KeeperHubClient;
-  /**
-   * Called when the ask tier opens an approval URL. Default: write to stderr
-   * (stdout is reserved for the Claude Code hook JSON output).
-   */
-  onAskOpen?: (url: string) => void;
-  /** Polling config for the ask tier */
-  poll?: { intervalMs: number; maxAttempts: number };
 };
 
-const DEFAULT_POLL = { intervalMs: 2000, maxAttempts: 150 } as const;
-const APPROVAL_URL_BASE = "https://app.keeperhub.com/approve/";
 const USDC_DECIMALS = 1_000_000;
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 const MICRO_USDC_RE = /^\d+$/;
@@ -103,12 +88,12 @@ function extractContractAddress(input: HookInput): string | null {
   const ti = input.tool_input ?? {};
   const challenge = (ti.paymentChallenge ?? {}) as Record<string, unknown>;
   // Precedence order:
-  //  1. challenge.asset — x402 TransferWithAuthorization: the ERC-20 contract
+  //  1. challenge.asset -- x402 TransferWithAuthorization: the ERC-20 contract
   //     the authorization is bound to (the EVM `eth.tx.to` at execution time).
   //     This mirrors the server-side Turnkey policy (policy.ts) which denies
   //     `eth.tx.to not in [USDC_BASE, USDC_TEMPO]`.
-  //  2. ti.contract / ti.assetAddress — agent-runtime-supplied hints.
-  //  3. ti.to / challenge.to — legacy tool_inputs that labeled the asset as
+  //  2. ti.contract / ti.assetAddress -- agent-runtime-supplied hints.
+  //  3. ti.to / challenge.to -- legacy tool_inputs that labeled the asset as
   //     "to" (some older MCP implementations). Kept for backwards compat.
   // NEVER reads challenge.payTo: that is the transfer recipient (the
   // facilitator or service operator), not the ERC-20 contract being invoked.
@@ -129,29 +114,38 @@ function usdToMicro(usd: number): bigint {
 }
 
 /**
- * Factory returning the PreToolUse hook function. The hook enforces the three
+ * Factory returning the PreToolUse hook function. The hook enforces three
  * client-side safety tiers (auto / ask / block) sourced EXCLUSIVELY from
  * ~/.keeperhub/safety.json -- never from the tool payload (GUARD-05).
+ *
+ * v0.1.4 collapsed the previous four-band behaviour into three:
+ *
+ *   amount <= auto_approve_max_usd                    -> {decision: "allow"}
+ *   auto_approve_max_usd < amount <= block_threshold  -> {decision: "ask"} (Claude Code prompts user inline)
+ *   amount > block_threshold                          -> {decision: "deny"}
+ *
+ * The previous server-approval branch (amount >= ask_threshold -> create a
+ * /api/agentic-wallet/approval-request row, print an approval URL, poll for
+ * browser approval) was removed. It required the wallet to be linked to a
+ * KeeperHub user via /link, and the link command was rough enough that we
+ * never wired it into the documented flow. Returning {decision: "ask"}
+ * inline lets Claude Code surface the prompt in the agent chat directly.
+ *
+ * `ask_threshold_usd` is still read from safety.json for backward-compat
+ * with existing configs but is not consulted for decision-making. Tracked
+ * as KEEP-307 for the permanent architectural decision.
  */
 export async function createPreToolUseHook(
   options: CreateHookOptions = {}
 ): Promise<(input: unknown) => Promise<HookDecision>> {
   const toolMatcher = options.toolNameMatcher ?? defaultToolMatcher;
   const configLoader = options.configLoader ?? loadSafetyConfig;
-  const walletLoader = options.walletLoader ?? readWalletConfig;
-  const clientFactory =
-    options.clientFactory ?? ((w: WalletConfig) => new KeeperHubClient(w));
-  const onAskOpen =
-    options.onAskOpen ??
-    ((url: string): void => {
-      process.stderr.write(
-        `\n[keeperhub-wallet] Approval required. Visit: ${url}\n`
-      );
-    });
-  const poll = options.poll ?? DEFAULT_POLL;
 
   const safety = await configLoader();
 
+  // The hook function is declared async so that synchronous throws in
+  // extractAmountMicroUsdc (GUARD-05 unit-tag enforcement) become rejected
+  // promises, matching the original pre-0.1.4 behaviour the tests rely on.
   return async (raw: unknown): Promise<HookDecision> => {
     const hookInput = (raw ?? {}) as HookInput;
 
@@ -178,63 +172,18 @@ export async function createPreToolUseHook(
     }
 
     const blockMicro = usdToMicro(safety.block_threshold_usd);
-    const askMicro = usdToMicro(safety.ask_threshold_usd);
     const autoMicro = usdToMicro(safety.auto_approve_max_usd);
 
     if (amountMicro > blockMicro) {
       return { decision: "deny", reason: "BLOCKED_BY_SAFETY_RULE" };
     }
 
-    if (amountMicro >= askMicro) {
-      // Open approval flow (create approval-request + poll until non-pending).
-      const wallet = await walletLoader();
-      const client = clientFactory(wallet);
-      // Server returns `{id}` on create; poll endpoint returns `{status}`.
-      const created = await client.request<{
-        id: string;
-      }>("POST", "/api/agentic-wallet/approval-request", {
-        // Server contract (Phase 33): riskLevel MUST be 'ask' or 'block';
-        // operationPayload MUST be a non-array object. The hook only creates
-        // approval-requests at the ask tier (block tier short-circuits above).
-        riskLevel: "ask",
-        operationPayload: {
-          amountMicroUsdc: amountMicro.toString(),
-          contractAddress: contractAddr ?? "",
-          toolName: hookInput.tool_name ?? "",
-          reason: `Agent tool ${hookInput.tool_name}`,
-        },
-      });
-      const approvalId =
-        "_status" in created ? created.approvalRequestId : created.id;
-      onAskOpen(`${APPROVAL_URL_BASE}${approvalId}`);
-      for (let attempt = 0; attempt < poll.maxAttempts; attempt++) {
-        await new Promise<void>((r) => setTimeout(r, poll.intervalMs));
-        const status = await client.request<{
-          status: "pending" | "approved" | "rejected";
-        }>("GET", `/api/agentic-wallet/approval-request/${approvalId}`);
-        // WR-03: align with payment-signer.ts:84 -- positive-shape check on
-        // the expected envelope. If a future server change or proxy returns
-        // a 202/other wrapper without `status`, keep polling instead of
-        // treating an unknown envelope as "pending" by implication.
-        if (!("status" in status)) {
-          continue;
-        }
-        if (status.status === "approved") {
-          return { decision: "allow" };
-        }
-        if (status.status === "rejected") {
-          return { decision: "deny", reason: "USER_REJECTED" };
-        }
-        // status === "pending" -- continue polling.
-      }
-      return { decision: "deny", reason: "APPROVAL_TIMEOUT" };
-    }
-
     if (amountMicro <= autoMicro) {
       return { decision: "allow" };
     }
 
-    // Middle band: above auto but below ask.
+    // Everything between auto and block is an inline ask -- Claude Code
+    // surfaces the prompt in-chat.
     return { decision: "ask" };
   };
 }

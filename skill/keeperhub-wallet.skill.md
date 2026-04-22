@@ -1,7 +1,7 @@
 ---
 name: keeperhub-wallet
 description: Pay x402 and MPP 402 responses with a server-proxied Turnkey wallet. Auto-pays Base USDC + Tempo USDC.e. Includes check balance, fund wallet, and three-tier safety hook (auto/ask/block). Install with `npx @keeperhub/wallet skill install`.
-version: 0.1.3
+version: 0.1.4
 license: Apache-2.0
 ---
 
@@ -46,7 +46,6 @@ Direct npm package invocation:
 - `npx @keeperhub/wallet add` — provision a new agentic wallet (no KeeperHub account required).
 - `npx @keeperhub/wallet info` — print `subOrgId` and `walletAddress` for the current wallet.
 - `npx @keeperhub/wallet fund` — print a Coinbase Onramp URL (Base USDC) and a Tempo deposit address.
-- `npx @keeperhub/wallet link` — link the current wallet to a KeeperHub account (requires `KH_SESSION_COOKIE`).
 - `npx @keeperhub/wallet balance` — print on-chain balance across Base USDC and Tempo USDC.e.
 
 Equivalent Go CLI wrappers (thin pass-through; delegate to the npm package):
@@ -54,19 +53,38 @@ Equivalent Go CLI wrappers (thin pass-through; delegate to the npm package):
 - `kh wallet add`
 - `kh wallet info`
 - `kh wallet fund`
-- `kh wallet link`
 
 ## Safety
 
 Three-tier PreToolUse hook enforced on every signing call:
 
-- **auto** — amount below `auto_approve_max_usd` signs without prompting.
-- **ask** — amount between `auto_approve_max_usd` and `ask_threshold_usd` surfaces an approval prompt in-chat.
-- **block** — amount above `block_threshold_usd` or contract not in `allowlisted_contracts` denies outright.
+- **auto** — amount at or below `auto_approve_max_usd` signs without prompting.
+- **ask** — amount above `auto_approve_max_usd` and at or below `block_threshold_usd` returns `{decision: "ask"}` so Claude Code surfaces an inline prompt in the agent chat.
+- **block** — amount above `block_threshold_usd`, or a contract not in `allowlisted_contracts`, is denied without calling `/sign`.
 
 Thresholds live in `~/.keeperhub/safety.json` (chmod 0o644). The `npx @keeperhub/wallet skill install` path registers the `keeperhub-wallet-hook` PreToolUse entry in `~/.claude/settings.json` automatically. For agents without auto-registration support (Cursor, Cline, Windsurf, OpenCode), the installer prints a copy-paste notice with the hook invocation.
 
-The hook reads only `tool_input.amount`, `tool_input.unit`, and `tool_input.to` — forged fields such as `trust-level hint`, `is-safe boolean`, or `admin-override bit` on the tool input are ignored by design (GUARD-05).
+The hook reads only the payment-challenge fields `amount`, `unit`, and the asset contract address from the tool payload. Forged fields like `trust-level hint`, `is-safe boolean`, or `admin-override bit` are ignored by design (GUARD-05).
+
+### Default safety config
+
+Used when `~/.keeperhub/safety.json` is absent:
+
+```json
+{
+  "auto_approve_max_usd": 5,
+  "block_threshold_usd": 100,
+  "allowlisted_contracts": [
+    "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "0x20C000000000000000000000B9537D11c60E8b50"
+  ]
+}
+```
+
+- `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` — **Base USDC**. Canonical Circle USDC contract on Base mainnet (chain id 8453). Used by x402 challenges from KeeperHub and any other x402-compliant service.
+- `0x20C000000000000000000000B9537D11c60E8b50` — **Tempo USDC.e**. USDC bridge token on Tempo mainnet (chain id 4217). Used by MPP challenges from KeeperHub paid workflows that settle on Tempo.
+
+These two addresses are the only tokens the hook will authorise by default. Adding other ERC-20 contracts to `allowlisted_contracts` allows your agent to sign against them too — at your own risk. To check any address, paste it into [BaseScan](https://basescan.org) (Base) or the Tempo block explorer; the contract page shows the token name, issuer, and whether it is verified.
 
 ## Storage
 
