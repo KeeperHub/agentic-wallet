@@ -131,7 +131,7 @@ describe("createPreToolUseHook() -- auto/ask/block tiers", () => {
       request: vi
         .fn()
         .mockResolvedValueOnce({
-          approvalRequestId: "ar_test",
+          id: "ar_test",
           status: "pending",
         })
         .mockResolvedValueOnce({ status: "approved" }),
@@ -167,7 +167,7 @@ describe("createPreToolUseHook() -- auto/ask/block tiers", () => {
       request: vi
         .fn()
         .mockResolvedValueOnce({
-          approvalRequestId: "ar_reject",
+          id: "ar_reject",
           status: "pending",
         })
         .mockResolvedValueOnce({ status: "rejected" }),
