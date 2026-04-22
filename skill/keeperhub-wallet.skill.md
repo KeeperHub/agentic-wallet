@@ -1,7 +1,7 @@
 ---
 name: keeperhub-wallet
-description: Pay x402 and MPP 402 responses with a server-proxied Turnkey wallet. Auto-pays Base USDC + Tempo USDC.e. Includes check balance, fund wallet, and three-tier safety hook (auto/ask/block). Install via `npx skills add keeperhub/agentic-wallet-skills` or `npx @keeperhub/wallet skill install`.
-version: 0.1.0
+description: Pay x402 and MPP 402 responses with a server-proxied Turnkey wallet. Auto-pays Base USDC + Tempo USDC.e. Includes check balance, fund wallet, and three-tier safety hook (auto/ask/block). Install with `npx @keeperhub/wallet skill install`.
+version: 0.1.2
 license: Apache-2.0
 ---
 
@@ -11,10 +11,27 @@ Enables automatic payment of HTTP 402 responses (x402 on Base USDC + MPP on Temp
 
 ## Install
 
-Two equivalent one-liners — pick whichever your agent runtime supports:
+**Recommended — one command, fully wired up:**
 
-- `npx skills add keeperhub/agentic-wallet-skills` — install via the vercel-labs/skills convention.
-- `npx @keeperhub/wallet skill install` — install directly from the npm package. Writes the skill file into every detected agent directory under `$HOME` (Claude Code, Cursor, Cline, Windsurf, OpenCode) and registers the `keeperhub-wallet-hook` PreToolUse hook in Claude Code automatically.
+```
+npx @keeperhub/wallet skill install
+```
+
+This writes the skill file into every detected agent directory under `$HOME` (Claude Code, Cursor, Cline, Windsurf, OpenCode) **and** registers the `keeperhub-wallet-hook` PreToolUse safety hook in `~/.claude/settings.json`. Re-running is safe — the installer is idempotent and preserves any foreign keys already in `settings.json`.
+
+**Alternative — `npx skills add` (skill file only):**
+
+```
+npx skills add keeperhub/agentic-wallet-skills
+```
+
+This installs the skill file via the vercel-labs/skills convention but **does not register the PreToolUse safety hook**. Without the hook, signing operations are not gated by your auto/ask/block thresholds. After running `skills add` you MUST also run:
+
+```
+npx @keeperhub/wallet skill install
+```
+
+to activate the safety hook. The combination is safe — `skill install` is idempotent and will not duplicate the skill file written by `skills add`.
 
 After install, provision a wallet with:
 
