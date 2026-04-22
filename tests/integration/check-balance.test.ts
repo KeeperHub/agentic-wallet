@@ -1,18 +1,14 @@
-import { HttpResponse, http } from "msw";
 import type { PublicClient } from "viem";
 import { describe, expect, it, vi } from "vitest";
 import { checkBalance } from "../../src/balance.js";
 import { BASE_USDC, TEMPO_USDC_E } from "../../src/chains.js";
 import type { WalletConfig } from "../../src/types.js";
-import { server } from "../setup.js";
 
 const wallet: WalletConfig = {
   subOrgId: "so_balance_test",
   walletAddress: "0x0000000000000000000000000000000000000007",
   hmacSecret: "dd".repeat(32),
 };
-
-const CREDIT_URL = "https://app.keeperhub.com/api/agentic-wallet/credit";
 
 type ReadContractArgs = {
   address: string;
@@ -42,17 +38,7 @@ function mockViemClient(balanceRawMicro: bigint): {
 }
 
 describe("checkBalance()", () => {
-  it("returns unified Base + Tempo + off-chain credit snapshot with correct contract addresses", async () => {
-    server.use(
-      http.get(CREDIT_URL, () =>
-        HttpResponse.json({
-          amount: "0.50",
-          currency: "USD",
-          subOrgId: wallet.subOrgId,
-        })
-      )
-    );
-
+  it("returns Base + Tempo on-chain snapshot with correct contract addresses", async () => {
     // BigInt(...) constructor (not literals) because the root tsconfig target
     // is ES2017, following the Phase 33 Plan 03 precedent (019c52ef).
     const { client: baseClient, calls: baseCalls } = mockViemClient(
@@ -77,7 +63,6 @@ describe("checkBalance()", () => {
       amount: "1.75",
       address: wallet.walletAddress,
     });
-    expect(snap.offChainCredit).toEqual({ amount: "0.50", currency: "USD" });
 
     // Contract-address regression guard: Base leg must hit BASE_USDC and
     // Tempo leg must hit TEMPO_USDC_E. Swapping these would return Base
@@ -94,16 +79,7 @@ describe("checkBalance()", () => {
     expect(BASE_USDC).not.toBe(TEMPO_USDC_E);
   });
 
-  it("completes in under 2s when all three legs resolve quickly (SC-3)", async () => {
-    server.use(
-      http.get(CREDIT_URL, () =>
-        HttpResponse.json({
-          amount: "0.50",
-          currency: "USD",
-          subOrgId: wallet.subOrgId,
-        })
-      )
-    );
+  it("completes in under 2s when both legs resolve quickly (SC-3)", async () => {
     const { client: baseClient } = mockViemClient(BigInt(1_000_000));
     const { client: tempoClient } = mockViemClient(BigInt(2_000_000));
 
@@ -113,12 +89,11 @@ describe("checkBalance()", () => {
     expect(elapsed).toBeLessThan(2000);
   });
 
-  it("issues the three reads in parallel (Promise.all)", async () => {
-    // Each leg waits 50ms before resolving. If the three legs were serial
-    // total elapsed would be >=150ms; parallel Promise.all should land
-    // under ~120ms.
+  it("issues the two reads in parallel (Promise.all)", async () => {
+    // Each leg waits 50ms before resolving. Serial would total >=100ms;
+    // parallel Promise.all should land under ~80ms.
     const LEG_DELAY_MS = 50;
-    const PARALLEL_CEILING_MS = 120;
+    const PARALLEL_CEILING_MS = 80;
 
     const delayedBalance = (value: bigint): PublicClient =>
       ({
@@ -132,17 +107,6 @@ describe("checkBalance()", () => {
 
     const baseClient = delayedBalance(BigInt(1_000_000));
     const tempoClient = delayedBalance(BigInt(2_000_000));
-
-    server.use(
-      http.get(CREDIT_URL, async () => {
-        await new Promise<void>((resolve) => setTimeout(resolve, LEG_DELAY_MS));
-        return HttpResponse.json({
-          amount: "0.50",
-          currency: "USD",
-          subOrgId: wallet.subOrgId,
-        });
-      })
-    );
 
     const start = Date.now();
     const snap = await checkBalance(wallet, { baseClient, tempoClient });
