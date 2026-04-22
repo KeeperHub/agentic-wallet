@@ -80,9 +80,17 @@ jobs:
       - name: Dry-run pack (inspect tarball contents)
         run: pnpm pack --dry-run
 
+      - name: Upgrade npm for OIDC trusted publishing
+        # npm 11.5.1+ has native OIDC trusted-publisher support. The Node 20 runner image ships
+        # with an older npm that does not perform the id-token exchange automatically, so pnpm
+        # and npm both fall back to ENEEDAUTH. Upgrade the global npm before publishing.
+        if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false) }}
+        run: npm install -g npm@latest
+
       - name: Publish to npm with provenance
         # Uses npm OIDC trusted publishing (configured at npmjs.com/package/@keeperhub/wallet/access).
-        # With `id-token: write` set above and no _authToken in .npmrc, pnpm publish detects the
-        # GitHub Actions OIDC env and exchanges it for a short-lived npm publish token.
+        # With `id-token: write` granted above, `npm publish` detects the GitHub Actions OIDC
+        # env (ACTIONS_ID_TOKEN_REQUEST_URL / ACTIONS_ID_TOKEN_REQUEST_TOKEN) and exchanges it
+        # for a short-lived publish token — no NPM_TOKEN required.
         if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false) }}
-        run: pnpm publish --provenance --access public --no-git-checks
+        run: npm publish --provenance --access public
