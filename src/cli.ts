@@ -1,8 +1,8 @@
 // CLI dispatcher for `npx @keeperhub/wallet <cmd>`. Ships 5 subcommands:
 // add (provision -- NO auth), link (HMAC + KH_SESSION_COOKIE dual-proof),
-// fund (pure string-build Coinbase Onramp + Tempo address), balance (unified
-// Base USDC + Tempo USDC.e + off-chain KeeperHub credit), info (print
-// subOrgId + walletAddress from ~/.keeperhub/wallet.json).
+// fund (pure string-build Coinbase Onramp + Tempo address), balance (Base
+// USDC + Tempo USDC.e), info (print subOrgId + walletAddress from
+// ~/.keeperhub/wallet.json).
 //
 // @security The HMAC secret written to wallet.json is NEVER printed to stdout
 // or stderr. `add` prints only subOrgId + walletAddress + the config path so
@@ -170,11 +170,8 @@ async function cmdFund(): Promise<void> {
 async function cmdBalance(): Promise<void> {
   const wallet = await readWalletConfig();
   const snap = await checkBalance(wallet);
-  process.stdout.write(`Base USDC:         ${snap.base.amount}\n`);
-  process.stdout.write(`Tempo USDC.e:      ${snap.tempo.amount}\n`);
-  process.stdout.write(
-    `KeeperHub credit:  ${snap.offChainCredit.amount} ${snap.offChainCredit.currency}\n`
-  );
+  process.stdout.write(`Base USDC:    ${snap.base.amount}\n`);
+  process.stdout.write(`Tempo USDC.e: ${snap.tempo.amount}\n`);
 }
 
 async function cmdInfo(): Promise<void> {
@@ -190,7 +187,7 @@ export async function runCli(argv: string[] = process.argv): Promise<void> {
     .description(
       "KeeperHub agentic wallet CLI (auto-pay x402 + MPP 402 responses)"
     )
-    .version("0.1.0");
+    .version("0.1.3");
 
   program
     .command("add")
@@ -221,9 +218,7 @@ export async function runCli(argv: string[] = process.argv): Promise<void> {
 
   program
     .command("balance")
-    .description(
-      "Print unified balance: Base USDC + Tempo USDC.e + off-chain KeeperHub credit"
-    )
+    .description("Print on-chain balance: Base USDC + Tempo USDC.e")
     .action(async () => {
       await cmdBalance();
     });

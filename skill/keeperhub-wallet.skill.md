@@ -1,7 +1,7 @@
 ---
 name: keeperhub-wallet
 description: Pay x402 and MPP 402 responses with a server-proxied Turnkey wallet. Auto-pays Base USDC + Tempo USDC.e. Includes check balance, fund wallet, and three-tier safety hook (auto/ask/block). Install with `npx @keeperhub/wallet skill install`.
-version: 0.1.2
+version: 0.1.3
 license: Apache-2.0
 ---
 
@@ -47,7 +47,7 @@ Direct npm package invocation:
 - `npx @keeperhub/wallet info` — print `subOrgId` and `walletAddress` for the current wallet.
 - `npx @keeperhub/wallet fund` — print a Coinbase Onramp URL (Base USDC) and a Tempo deposit address.
 - `npx @keeperhub/wallet link` — link the current wallet to a KeeperHub account (requires `KH_SESSION_COOKIE`).
-- `npx @keeperhub/wallet balance` — print unified balance across Base USDC, Tempo USDC.e, and off-chain KeeperHub credit.
+- `npx @keeperhub/wallet balance` — print on-chain balance across Base USDC and Tempo USDC.e.
 
 Equivalent Go CLI wrappers (thin pass-through; delegate to the npm package):
 
