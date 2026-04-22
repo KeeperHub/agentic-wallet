@@ -90,7 +90,7 @@ describe("Hook integration -- JSON envelope for Claude Code PreToolUse", () => {
     const requestMock = vi
       .fn()
       .mockResolvedValueOnce({
-        approvalRequestId: "ar_int",
+        id: "ar_int",
         status: "pending",
       })
       .mockResolvedValueOnce({ status: "approved" });

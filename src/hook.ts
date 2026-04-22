@@ -99,12 +99,27 @@ function extractAmountMicroUsdc(input: HookInput): bigint | null {
   return BigInt(Math.round(directAmount * USDC_DECIMALS));
 }
 
-function extractToAddress(input: HookInput): string | null {
+function extractContractAddress(input: HookInput): string | null {
   const ti = input.tool_input ?? {};
   const challenge = (ti.paymentChallenge ?? {}) as Record<string, unknown>;
-  const to = ti.to ?? challenge.payTo ?? challenge.to;
-  if (typeof to === "string" && ADDRESS_RE.test(to)) {
-    return to.toLowerCase();
+  // Precedence order:
+  //  1. challenge.asset — x402 TransferWithAuthorization: the ERC-20 contract
+  //     the authorization is bound to (the EVM `eth.tx.to` at execution time).
+  //     This mirrors the server-side Turnkey policy (policy.ts) which denies
+  //     `eth.tx.to not in [USDC_BASE, USDC_TEMPO]`.
+  //  2. ti.contract / ti.assetAddress — agent-runtime-supplied hints.
+  //  3. ti.to / challenge.to — legacy tool_inputs that labeled the asset as
+  //     "to" (some older MCP implementations). Kept for backwards compat.
+  // NEVER reads challenge.payTo: that is the transfer recipient (the
+  // facilitator or service operator), not the ERC-20 contract being invoked.
+  const contract =
+    challenge.asset ??
+    ti.contract ??
+    ti.assetAddress ??
+    ti.to ??
+    challenge.to;
+  if (typeof contract === "string" && ADDRESS_RE.test(contract)) {
+    return contract.toLowerCase();
   }
   return null;
 }
@@ -151,10 +166,10 @@ export async function createPreToolUseHook(
     }
 
     // GUARD-05: ONLY these fields. No trust/override/admin_* reads.
-    const toAddr = extractToAddress(hookInput);
+    const contractAddr = extractContractAddress(hookInput);
     const amountMicro = extractAmountMicroUsdc(hookInput);
 
-    if (toAddr && !safety.allowlisted_contracts.includes(toAddr)) {
+    if (contractAddr && !safety.allowlisted_contracts.includes(contractAddr)) {
       return { decision: "deny", reason: "CONTRACT_NOT_ALLOWLISTED" };
     }
 
@@ -174,15 +189,23 @@ export async function createPreToolUseHook(
       // Open approval flow (create approval-request + poll until non-pending).
       const wallet = await walletLoader();
       const client = clientFactory(wallet);
+      // Server returns `{id}` on create; poll endpoint returns `{status}`.
       const created = await client.request<{
-        approvalRequestId: string;
-        status: string;
+        id: string;
       }>("POST", "/api/agentic-wallet/approval-request", {
-        amountMicroUsdc: amountMicro.toString(),
-        toAddress: toAddr ?? "",
-        reason: `Agent tool ${hookInput.tool_name}`,
+        // Server contract (Phase 33): riskLevel MUST be 'ask' or 'block';
+        // operationPayload MUST be a non-array object. The hook only creates
+        // approval-requests at the ask tier (block tier short-circuits above).
+        riskLevel: "ask",
+        operationPayload: {
+          amountMicroUsdc: amountMicro.toString(),
+          contractAddress: contractAddr ?? "",
+          toolName: hookInput.tool_name ?? "",
+          reason: `Agent tool ${hookInput.tool_name}`,
+        },
       });
-      const approvalId = created.approvalRequestId;
+      const approvalId =
+        "_status" in created ? created.approvalRequestId : created.id;
       onAskOpen(`${APPROVAL_URL_BASE}${approvalId}`);
       for (let attempt = 0; attempt < poll.maxAttempts; attempt++) {
         await new Promise<void>((r) => setTimeout(r, poll.intervalMs));
