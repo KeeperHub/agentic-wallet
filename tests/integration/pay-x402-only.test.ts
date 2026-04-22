@@ -10,7 +10,8 @@ const wallet: WalletConfig = {
   hmacSecret: "aa".repeat(32),
 };
 
-const RESOURCE_URL = "https://app.keeperhub.com/api/mcp/demo/call";
+const RESOURCE_URL =
+  "https://app.keeperhub.com/api/mcp/workflows/demo/call";
 // 132 chars total: 0x + 130 hex.
 const SIG_HEX = `0x${"a".repeat(130)}`;
 
@@ -22,8 +23,14 @@ describe("paymentSigner.pay() -- PAY-01 x402-only on Base USDC", () => {
       http.post(
         "https://app.keeperhub.com/api/agentic-wallet/sign",
         async ({ request }) => {
-          const body = (await request.json()) as { chain: string };
+          const body = (await request.json()) as {
+            chain: string;
+            workflowSlug?: string;
+          };
           expect(body.chain).toBe("base");
+          // v0.1.5: workflowSlug forwarded so the server can verify
+          // payTo + amount against the workflows registry.
+          expect(body.workflowSlug).toBe("demo");
           return HttpResponse.json({ signature: SIG_HEX });
         }
       ),

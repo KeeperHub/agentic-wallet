@@ -10,11 +10,12 @@ const wallet: WalletConfig = {
   hmacSecret: "cc".repeat(32),
 };
 
-const RESOURCE_URL = "https://app.keeperhub.com/api/mcp/demo/dual-call";
+const RESOURCE_URL =
+  "https://app.keeperhub.com/api/mcp/workflows/dual-demo/call";
 
 describe("paymentSigner.pay() -- PAY-03 dual-challenge prefers MPP, single credential", () => {
   it("submits exactly one credential (MPP) when both x402 and MPP are offered", async () => {
-    const signCalls: Array<{ chain: string }> = [];
+    const signCalls: Array<{ chain: string; workflowSlug?: string }> = [];
     let retryCount = 0;
     let capturedAuth: string | null = null;
     let capturedPaymentSig: string | null = null;
@@ -23,8 +24,11 @@ describe("paymentSigner.pay() -- PAY-03 dual-challenge prefers MPP, single crede
       http.post(
         "https://app.keeperhub.com/api/agentic-wallet/sign",
         async ({ request }) => {
-          const body = (await request.json()) as { chain: string };
-          signCalls.push({ chain: body.chain });
+          const body = (await request.json()) as {
+            chain: string;
+            workflowSlug?: string;
+          };
+          signCalls.push({ chain: body.chain, workflowSlug: body.workflowSlug });
           return HttpResponse.json({ signature: "dual-mpp-credential" });
         }
       ),
@@ -73,7 +77,7 @@ describe("paymentSigner.pay() -- PAY-03 dual-challenge prefers MPP, single crede
     // PAY-03 core assertion: exactly ONE /sign call, and it is MPP
     // (chain=tempo).
     expect(signCalls).toHaveLength(1);
-    expect(signCalls[0]).toEqual({ chain: "tempo" });
+    expect(signCalls[0]).toEqual({ chain: "tempo", workflowSlug: "dual-demo" });
     // No x402 call was made -- no double-charge.
     const baseCalls = signCalls.filter((c) => c.chain === "base");
     expect(baseCalls).toHaveLength(0);
