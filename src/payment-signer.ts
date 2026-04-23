@@ -283,16 +283,20 @@ export function createPaymentSigner(
 
     const wallet = await walletLoader();
 
-    // PAY-03: prefer MPP when both present. Submit EXACTLY ONE credential.
-    // Early return on the MPP branch guarantees payViaX402 is unreachable
-    // when both challenges are offered (T-34-ps-02 mitigation).
-    // Semantic rule: `if (mpp) return payViaMpp(...)` takes precedence
-    // over `if (x402) return payViaX402(...)` -- no dual-protocol submission.
-    if (mpp) {
-      return payViaMpp(response, mpp, wallet, options);
-    }
+    // Prefer x402 (Base USDC) when both challenges are offered. Submit
+    // EXACTLY ONE credential (T-34-ps-02: no dual-protocol submission).
+    //
+    // MPP on Tempo currently supports proof-mode only (zero-amount
+    // challenges); transaction-mode (non-zero charge intents) is not yet
+    // implemented on the KeeperHub server, so prefer-MPP would fail against
+    // every paid workflow that offers both. x402-first keeps auto-pay
+    // working for charge-intent workflows; MPP is still used when a 402
+    // offers MPP alone (e.g. future zero-amount gating).
     if (x402) {
       return payViaX402(response, x402, wallet, options);
+    }
+    if (mpp) {
+      return payViaMpp(response, mpp, wallet, options);
     }
     return response;
   }
