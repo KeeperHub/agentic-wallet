@@ -45,8 +45,52 @@ type PaySignerOptions = {
   approval?: { intervalMs: number; maxAttempts: number };
 };
 
+/**
+ * Retry options threaded through `pay()` and `fetch()` into the post-sign
+ * retry. Lets callers forward the original request body and headers so the
+ * paid workflow receives the same payload on the retry as on the 402 attempt
+ * -- otherwise a workflow whose input schema requires a body (e.g.
+ * `{address}` on `/api/mcp/workflows/<slug>/call`) rejects the retry with
+ * 400 "Invalid JSON body".
+ */
+export type PayRetryOptions = {
+  /**
+   * Body to re-send on the retry. Must be a type that can be sent twice --
+   * string, ArrayBuffer, Uint8Array, FormData, URLSearchParams, or Blob.
+   * ReadableStream bodies are NOT supported because the first fetch() already
+   * consumed the stream; pass a string/Buffer instead.
+   */
+  body?: RequestInit["body"];
+  /**
+   * Additional request headers to merge onto the retry (e.g. Content-Type).
+   * The payment auth header (PAYMENT-SIGNATURE or Authorization) is set by
+   * the signer and overrides any same-named header in this map.
+   */
+  headers?: RequestInit["headers"];
+  /** HTTP method for the retry. Defaults to "POST". */
+  method?: string;
+};
+
 export type PaymentSigner = {
-  pay: (response: Response) => Promise<Response>;
+  /**
+   * Pays a 402 response and returns the post-payment retry Response.
+   * Non-402 responses are returned unchanged.
+   *
+   * Pass `options.body` (and usually `options.headers`) if the paid
+   * workflow's input schema requires a body -- `pay()` does not have access
+   * to the original request otherwise.
+   *
+   * For most agent code, prefer `signer.fetch(url, init)` which threads the
+   * body/headers automatically.
+   */
+  pay: (response: Response, options?: PayRetryOptions) => Promise<Response>;
+  /**
+   * `fetch(url, init)` wrapper: does the initial fetch, and on 402 calls
+   * `pay()` with `init.body` + `init.headers` so the retry carries the
+   * original payload. Returns whatever the retry (or first response, if not
+   * 402) returns. No-op for non-402 responses.
+   */
+  fetch: (input: string | URL, init?: RequestInit) => Promise<Response>;
 };
 
 async function sleep(ms: number): Promise<void> {
@@ -115,7 +159,8 @@ export function createPaymentSigner(
   async function payViaMpp(
     response: Response,
     mpp: MppChallenge,
-    wallet: WalletConfig
+    wallet: WalletConfig,
+    retry: PayRetryOptions | undefined
   ): Promise<Response> {
     const slug = extractKeeperHubWorkflowSlug(response.url);
     if (!slug.ok) {
@@ -134,19 +179,20 @@ export function createPaymentSigner(
         chainId: TEMPO_CHAIN_ID,
       },
     });
-    // POST is correct for v0.1.0 target (KeeperHub paid workflows per
-    // 34-CONTEXT scope). Custom HTTP methods can be added via retryOptions in
-    // a later release; do NOT read X-Replay-Method here.
+    const headers = new Headers(retry?.headers);
+    headers.set("Authorization", `Payment ${signature}`);
     return fetchImpl(response.url, {
-      method: "POST",
-      headers: { Authorization: `Payment ${signature}` },
+      method: retry?.method ?? "POST",
+      headers,
+      body: retry?.body ?? undefined,
     });
   }
 
   async function payViaX402(
     response: Response,
     x402: X402Challenge,
-    wallet: WalletConfig
+    wallet: WalletConfig,
+    retry: PayRetryOptions | undefined
   ): Promise<Response> {
     const accept = x402.accepts[0];
     if (!accept) {
@@ -204,41 +250,64 @@ export function createPaymentSigner(
     ).toString("base64");
 
     const retryUrl = x402.resource.url || response.url;
-    // POST is correct for v0.1.0 target (KeeperHub paid workflows). Custom
-    // methods can be added via retryOptions in a later release; do NOT read
-    // X-Replay-Method here.
+    const headers = new Headers(retry?.headers);
+    headers.set("PAYMENT-SIGNATURE", paymentSigHeader);
     return fetchImpl(retryUrl, {
-      method: "POST",
-      headers: { "PAYMENT-SIGNATURE": paymentSigHeader },
+      method: retry?.method ?? "POST",
+      headers,
+      body: retry?.body ?? undefined,
     });
   }
 
-  return {
-    async pay(response: Response): Promise<Response> {
-      if (response.status !== 402) {
-        return response;
-      }
-
-      const x402 = await parseX402Challenge(response);
-      const mpp = parseMppChallenge(response);
-      if (!(x402 || mpp)) {
-        return response;
-      }
-
-      const wallet = await walletLoader();
-
-      // PAY-03: prefer MPP when both present. Submit EXACTLY ONE credential.
-      // Early return on the MPP branch guarantees payViaX402 is unreachable
-      // when both challenges are offered (T-34-ps-02 mitigation).
-      // Semantic rule: `if (mpp) return payViaMpp(...)` takes precedence
-      // over `if (x402) return payViaX402(...)` -- no dual-protocol submission.
-      if (mpp) {
-        return payViaMpp(response, mpp, wallet);
-      }
-      if (x402) {
-        return payViaX402(response, x402, wallet);
-      }
+  async function pay(
+    response: Response,
+    options?: PayRetryOptions
+  ): Promise<Response> {
+    if (response.status !== 402) {
       return response;
+    }
+
+    const x402 = await parseX402Challenge(response);
+    const mpp = parseMppChallenge(response);
+    if (!(x402 || mpp)) {
+      return response;
+    }
+
+    const wallet = await walletLoader();
+
+    // PAY-03: prefer MPP when both present. Submit EXACTLY ONE credential.
+    // Early return on the MPP branch guarantees payViaX402 is unreachable
+    // when both challenges are offered (T-34-ps-02 mitigation).
+    // Semantic rule: `if (mpp) return payViaMpp(...)` takes precedence
+    // over `if (x402) return payViaX402(...)` -- no dual-protocol submission.
+    if (mpp) {
+      return payViaMpp(response, mpp, wallet, options);
+    }
+    if (x402) {
+      return payViaX402(response, x402, wallet, options);
+    }
+    return response;
+  }
+
+  return {
+    pay,
+    async fetch(
+      input: string | URL,
+      init?: RequestInit
+    ): Promise<Response> {
+      const first = await fetchImpl(input, init);
+      if (first.status !== 402) {
+        return first;
+      }
+      // Forward the caller's body + headers + method to the post-sign retry
+      // so the paid workflow receives the same payload on the retry as on
+      // the 402 attempt. Fixes the dropped-body bug that made any workflow
+      // with a required-input schema reject the retry with 400.
+      return pay(first, {
+        body: init?.body ?? undefined,
+        headers: init?.headers,
+        method: init?.method,
+      });
     },
   };
 }

@@ -15,7 +15,24 @@ npx @keeperhub/wallet add
 
 ```ts
 import { paymentSigner } from "@keeperhub/wallet";
-const paid = await paymentSigner.pay(await fetch(url));
+
+// One-liner: send the same init you'd pass to fetch(); a 402 is paid and
+// the retry carries the original body + headers automatically.
+const paid = await paymentSigner.fetch(url, {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ address: "0x..." }),
+});
+```
+
+For advanced flows where you already hold the 402 `Response`, pass the
+original body/headers explicitly so the retry doesn't drop them:
+
+```ts
+const paid = await paymentSigner.pay(response402, {
+  body: JSON.stringify(payload),
+  headers: { "content-type": "application/json" },
+});
 ```
 
 Full walkthrough (safety hooks, approval flow, comparison with agentcash + Coinbase): https://docs.keeperhub.com/ai-tools/agentic-wallet
