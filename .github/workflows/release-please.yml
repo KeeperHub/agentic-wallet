@@ -1,0 +1,29 @@
+# Type: releaser-pr | Maintains a "release PR" that accumulates conventional-commit
+# changelog entries. Merging the PR bumps package.json + manifest + creates the
+# git tag, which fires publish.yml (tag-triggered) for the actual npm publish.
+#
+# Closes the "merged but never tagged" trap (v0.1.5 + v0.1.6 both had to be
+# tagged manually despite the version bump being in the PR).
+#
+# Token: requires a PAT so the created tag push triggers downstream workflows
+# (publish.yml + sync-skills-repo.yml). GITHUB_TOKEN-created tags don't
+# trigger other workflows.
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          token: ${{ secrets.RELEASE_TAG_PAT }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
