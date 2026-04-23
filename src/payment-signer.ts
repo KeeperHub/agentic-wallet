@@ -229,20 +229,28 @@ export function createPaymentSigner(
       },
     });
 
-    // Build the PAYMENT-SIGNATURE header: base64(JSON({payload.authorization:
-    // {from,to,value,validAfter,validBefore,nonce},signature})) in the exact
-    // shape lib/x402/payment-gate.ts::extractPayerAddress decodes.
+    // x402 v2 PaymentPayload per @x402/core mechanisms-* d.ts:
+    //   { x402Version: 2, accepted: PaymentRequirements, payload: {...} }
+    // The server's findMatchingRequirements does a deepEqual between
+    // `paymentPayload.accepted` and each challenge `accepts[]` entry, so we
+    // mirror the exact accept object we signed against.
+    //
+    // EIP-3009 inner payload: authorization.value/validAfter/validBefore/nonce
+    // must be STRINGS at the wire format (per @x402/evm ExactEIP3009Payload).
+    // /sign takes them as numbers; we stringify on the way out.
     const paymentSigPayload = {
+      x402Version: 2,
+      accepted: accept,
       payload: {
+        signature,
         authorization: {
           from: wallet.walletAddress,
           to: accept.payTo,
           value: accept.amount,
-          validAfter,
-          validBefore,
+          validAfter: String(validAfter),
+          validBefore: String(validBefore),
           nonce,
         },
-        signature,
       },
     };
     const paymentSigHeader = Buffer.from(

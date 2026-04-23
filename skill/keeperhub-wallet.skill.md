@@ -1,7 +1,7 @@
 ---
 name: keeperhub-wallet
 description: Pay x402 and MPP 402 responses with a server-proxied Turnkey wallet. Auto-pays Base USDC + Tempo USDC.e. Includes check balance, fund wallet, and three-tier safety hook (auto/ask/block). Install with `npx @keeperhub/wallet skill install`.
-version: 0.1.6
+version: 0.1.7
 license: Apache-2.0
 ---
 
