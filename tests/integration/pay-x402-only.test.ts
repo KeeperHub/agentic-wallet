@@ -81,5 +81,37 @@ describe("paymentSigner.pay() -- PAY-01 x402-only on Base USDC", () => {
     // test in the keeperhub repo (tests/integration/agentic-wallet-sign-route.test.ts).
     expect(capturedSigHeader).toBeTruthy();
     expect(typeof capturedSigHeader).toBe("string");
+
+    // v0.1.7 shape check: PaymentPayload decodes with x402Version=2, accepted
+    // mirrors the exact accept entry (for server findMatchingRequirements
+    // deepEqual), and EIP-3009 wire fields are stringified per
+    // @x402/evm ExactEIP3009Payload.
+    const sig = capturedSigHeader as unknown as string;
+    type ExactAuth = {
+      from: string;
+      to: string;
+      value: string;
+      validAfter: string;
+      validBefore: string;
+      nonce: string;
+    };
+    type DecodedPayload = {
+      x402Version: number;
+      accepted: { scheme: string; network: string; amount: string; payTo: string };
+      payload: { signature: string; authorization: ExactAuth };
+    };
+    const decoded = JSON.parse(
+      Buffer.from(sig, "base64").toString("utf-8")
+    ) as DecodedPayload;
+    expect(decoded.x402Version).toBe(2);
+    expect(decoded.accepted.scheme).toBe("exact");
+    expect(decoded.accepted.network).toBe("eip155:8453");
+    expect(decoded.accepted.amount).toBe("1000000");
+    expect(decoded.accepted.payTo).toBe(
+      "0x0000000000000000000000000000000000000099"
+    );
+    expect(typeof decoded.payload.authorization.validAfter).toBe("string");
+    expect(typeof decoded.payload.authorization.validBefore).toBe("string");
+    expect(decoded.payload.authorization.value).toBe("1000000");
   });
 });
