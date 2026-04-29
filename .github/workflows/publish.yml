@@ -1,5 +1,5 @@
 # Type: releaser | Publishes @keeperhub/wallet to npm on tag with OIDC trusted publishing.
-# Trigger: tags matching `@keeperhub/wallet@*` (e.g. `@keeperhub/wallet@0.1.0`).
+# Trigger: tags matching `v*` (legacy) or `wallet-v*` (release-please component tag).
 # Gates (all blocking): supply-chain-guard test + pnpm audit (runtime deps, high) + build + type-check + full test suite.
 # Note: `pnpm audit --prod` is the pnpm-workspace equivalent of `npm audit --omit=dev`.
 name: Publish @keeperhub/wallet
@@ -8,6 +8,7 @@ on:
   push:
     tags:
       - 'v*'
+      - 'wallet-v*'
   workflow_dispatch:
     inputs:
       dry_run:
