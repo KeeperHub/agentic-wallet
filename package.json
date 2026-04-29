@@ -1,6 +1,6 @@
 {
   "name": "@keeperhub/wallet",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "KeeperHub agentic wallet: auto-pay x402 and MPP 402 responses with a server-side Turnkey proxy.",
   "license": "Apache-2.0",
   "type": "module",
