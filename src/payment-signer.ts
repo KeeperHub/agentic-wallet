@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { KeeperHubClient } from "./client.js";
 import { type MppChallenge, parseMppChallenge } from "./mpp-detect.js";
 import { readWalletConfig } from "./storage.js";
-import { KeeperHubError, type WalletConfig } from "./types.js";
+import { KeeperHubError, type PaymentHint, type WalletConfig } from "./types.js";
 import { extractKeeperHubWorkflowSlug } from "./workflow-slug.js";
 import { parseX402Challenge, type X402Challenge } from "./x402-detect.js";
 
@@ -69,7 +69,18 @@ export type PayRetryOptions = {
   headers?: RequestInit["headers"];
   /** HTTP method for the retry. Defaults to "POST". */
   method?: string;
+  /**
+   * Per-call protocol preference. "x402" forces Base USDC; "mpp" forces Tempo
+   * USDC.e; "auto" (default, also the behaviour when omitted) uses x402 when
+   * offered, MPP otherwise. Throws KeeperHubError("X402_NOT_OFFERED") or
+   * KeeperHubError("MPP_NOT_OFFERED") when the requested protocol is absent
+   * from the challenge (KEEP-361).
+   */
+  paymentHint?: PaymentHint;
 };
+
+/** RequestInit extended with paymentHint for per-call protocol selection. */
+export type FetchInit = RequestInit & { paymentHint?: PaymentHint };
 
 export type PaymentSigner = {
   /**
@@ -89,12 +100,54 @@ export type PaymentSigner = {
    * `pay()` with `init.body` + `init.headers` so the retry carries the
    * original payload. Returns whatever the retry (or first response, if not
    * 402) returns. No-op for non-402 responses.
+   *
+   * Pass `init.paymentHint` to force a specific payment protocol for this
+   * call. Omitting it is equivalent to `paymentHint: "auto"` (x402-first).
    */
-  fetch: (input: string | URL, init?: RequestInit) => Promise<Response>;
+  fetch: (input: string | URL, init?: FetchInit) => Promise<Response>;
 };
 
 async function sleep(ms: number): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Pure function that decides which payment protocol to use given challenge
+ * availability and caller's hint. Exported for unit testing.
+ *
+ * Returns "x402" or "mpp" to direct the caller to the appropriate path,
+ * or null when hint is "auto" and no challenge is present (pay() then
+ * returns the original 402 response unchanged). Throws KeeperHubError with
+ * a specific code when the requested protocol is unavailable (KEEP-361).
+ */
+export function selectProtocol(
+  x402: X402Challenge | null,
+  mpp: MppChallenge | null,
+  hint: PaymentHint | undefined
+): "x402" | "mpp" | null {
+  const h = hint ?? "auto";
+  if (h === "x402") {
+    if (!x402) {
+      throw new KeeperHubError(
+        "X402_NOT_OFFERED",
+        "x402 is not offered by this endpoint"
+      );
+    }
+    return "x402";
+  }
+  if (h === "mpp") {
+    if (!mpp) {
+      throw new KeeperHubError(
+        "MPP_NOT_OFFERED",
+        "mpp is not offered by this endpoint"
+      );
+    }
+    return "mpp";
+  }
+  // h === "auto": x402-first, then MPP, then null
+  if (x402) return "x402";
+  if (mpp) return "mpp";
+  return null;
 }
 
 export function createPaymentSigner(
@@ -283,20 +336,15 @@ export function createPaymentSigner(
 
     const wallet = await walletLoader();
 
-    // Prefer x402 (Base USDC) when both challenges are offered. Submit
-    // EXACTLY ONE credential (T-34-ps-02: no dual-protocol submission).
-    //
-    // MPP on Tempo currently supports proof-mode only (zero-amount
-    // challenges); transaction-mode (non-zero charge intents) is not yet
-    // implemented on the KeeperHub server, so prefer-MPP would fail against
-    // every paid workflow that offers both. x402-first keeps auto-pay
-    // working for charge-intent workflows; MPP is still used when a 402
-    // offers MPP alone (e.g. future zero-amount gating).
-    if (x402) {
-      return payViaX402(response, x402, wallet, options);
+    // Protocol selection is delegated to selectProtocol(). Default "auto"
+    // preserves x402-first behavior. Per-call override via paymentHint
+    // option (KEEP-361). Submit EXACTLY ONE credential (T-34-ps-02).
+    const protocol = selectProtocol(x402, mpp, options?.paymentHint);
+    if (protocol === "x402") {
+      return payViaX402(response, x402 as X402Challenge, wallet, options);
     }
-    if (mpp) {
-      return payViaMpp(response, mpp, wallet, options);
+    if (protocol === "mpp") {
+      return payViaMpp(response, mpp as MppChallenge, wallet, options);
     }
     return response;
   }
@@ -305,20 +353,21 @@ export function createPaymentSigner(
     pay,
     async fetch(
       input: string | URL,
-      init?: RequestInit
+      init?: FetchInit
     ): Promise<Response> {
       const first = await fetchImpl(input, init);
       if (first.status !== 402) {
         return first;
       }
-      // Forward the caller's body + headers + method to the post-sign retry
-      // so the paid workflow receives the same payload on the retry as on
-      // the 402 attempt. Fixes the dropped-body bug that made any workflow
-      // with a required-input schema reject the retry with 400.
+      // Forward the caller's body + headers + method + paymentHint to the
+      // post-sign retry so the paid workflow receives the same payload on the
+      // retry as on the 402 attempt. Fixes the dropped-body bug that made any
+      // workflow with a required-input schema reject the retry with 400.
       return pay(first, {
         body: init?.body ?? undefined,
         headers: init?.headers,
         method: init?.method,
+        paymentHint: init?.paymentHint,
       });
     },
   };

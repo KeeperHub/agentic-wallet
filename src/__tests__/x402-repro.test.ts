@@ -80,7 +80,7 @@ const TEST_MESSAGE = {
 const DOMAIN_CORRECT = {
   name: "USD Coin",
   version: "2",
-  chainId: 8453,
+  chainId: BigInt(8453),
   verifyingContract: USDC_BASE_ADDRESS,
 } as const;
 
@@ -92,7 +92,7 @@ const DOMAIN_CORRECT = {
 const DOMAIN_EMPTY_NAME_VERSION = {
   name: "",
   version: "",
-  chainId: 8453,
+  chainId: BigInt(8453),
   verifyingContract: USDC_BASE_ADDRESS,
 } as const;
 

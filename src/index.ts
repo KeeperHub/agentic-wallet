@@ -18,8 +18,11 @@ export { runHookCli } from "./hook-entrypoint.js";
 export { type MppChallenge, parseMppChallenge } from "./mpp-detect.js";
 export {
   createPaymentSigner,
+  type FetchInit,
   type PaymentSigner,
   paymentSigner,
+  type PayRetryOptions,
+  selectProtocol,
 } from "./payment-signer.js";
 export {
   DEFAULT_SAFETY_CONFIG,
@@ -43,6 +46,7 @@ export {
   type HmacHeaders,
   type HookDecision,
   KeeperHubError,
+  type PaymentHint,
   type WalletConfig,
   WalletConfigMissingError,
 } from "./types.js";

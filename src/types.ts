@@ -29,6 +29,10 @@ export class KeeperHubError extends Error {
   }
 }
 
+/** Protocol preference for a single pay() or fetch() call. "auto" preserves
+ *  the x402-first default when both challenges are offered. */
+export type PaymentHint = "x402" | "mpp" | "auto";
+
 export class WalletConfigMissingError extends Error {
   constructor() {
     super(
