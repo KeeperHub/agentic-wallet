@@ -36,6 +36,8 @@ export {
   type InstallResult,
   installSkill,
   registerClaudeCodeHook,
+  type RegisterClaudeCodeHookOptions,
+  resolveHookCommand,
 } from "./skill-install.js";
 export {
   getWalletConfigPath,

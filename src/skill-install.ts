@@ -5,26 +5,160 @@
 //     detected agent's skills directory and, for Claude Code, registers a
 //     PreToolUse hook pointing at `keeperhub-wallet-hook` in
 //     ~/.claude/settings.json. For non-claude agents, emits a stderr notice.
-//   - registerClaudeCodeHook(settingsPath) -- pure settings.json patcher
-//     used internally; exported so tests can drive it directly.
+//   - registerClaudeCodeHook(settingsPath, options?) -- pure settings.json
+//     patcher used internally; exported so tests can drive it directly.
+//
+// Hook command resolution: the README's recommended install path is
+// `npx @keeperhub/wallet skill install`, which does not put the bin on the
+// system PATH. If we wrote a bare `keeperhub-wallet-hook` command in that
+// case, the hook would fire `command not found` on every tool call. So at
+// install time we probe PATH; if the bin resolves we keep the bare command
+// (lowest startup latency), otherwise we fall back to an `npx` invocation
+// that resolves regardless of where future shells run.
 //
 // Idempotency rule: re-running the installer MUST NOT create a duplicate
 // hook entry. We filter any existing array element whose serialised form
 // contains `keeperhub-wallet-hook` before appending a single fresh record.
+// The marker substring is present in BOTH the bare and npx forms, so the
+// de-dup survives a global-install → npx-install transition (and back).
 //
 // Preservation rule: all top-level keys in settings.json other than
 // hooks.PreToolUse MUST be byte-preserved. We only ever touch
 // hooks.PreToolUse; any foreign hooks.PostToolUse entries survive verbatim.
 
+import { execFileSync } from "node:child_process";
 import { chmod, copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type AgentTarget, detectAgents } from "./agent-detect.js";
 
-const HOOK_COMMAND = "keeperhub-wallet-hook";
-// Match rule for de-dup: any existing PreToolUse entry whose JSON form
-// mentions this string is considered "ours" and is removed before append.
-const KEEPERHUB_HOOK_MARKER = "keeperhub-wallet-hook";
+const HOOK_BIN = "keeperhub-wallet-hook";
+const HOOK_COMMAND_BARE = HOOK_BIN;
+const PACKAGE_NAME = "@keeperhub/wallet";
+
+/**
+ * Read the installer's own version from package.json so the npx command
+ * pins to it. Pinning matters because `npx -y` would otherwise pull
+ * `latest` on every PreToolUse hook fire — any future compromise of the
+ * `@keeperhub/wallet` scope on the npm registry would be executed on
+ * every tool call by every npx-installed user. Pinning to the version
+ * shipped at install time makes upgrades explicit (re-run skill install)
+ * and bounds the supply-chain blast radius to "code that was already
+ * trusted enough to install".
+ *
+ * Falls back to "latest" only if package.json cannot be located, which
+ * should never happen in published builds (dist/ sits next to package.json
+ * via pkg.files). The fallback exists so test runs from src/ — where the
+ * resolution path is `here/../package.json` — never crash the installer.
+ */
+function readPackageVersion(): string {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    // Module lives in dist/ at runtime and src/ during tests; in both cases
+    // package.json is one level up.
+    const pkgPath = join(here, "..", "package.json");
+    const raw = readFileSync(pkgPath, "utf-8");
+    const parsed = JSON.parse(raw) as { version?: string };
+    if (typeof parsed.version === "string" && parsed.version.length > 0) {
+      return parsed.version;
+    }
+  } catch {
+    // Fall through.
+  }
+  return "latest";
+}
+
+function buildNpxCommand(version: string): string {
+  return `npx -y -p ${PACKAGE_NAME}@${version} ${HOOK_BIN}`;
+}
+
+// Match rule for de-dup: any existing PreToolUse entry whose `command`
+// string contains this substring is considered "ours" and is removed
+// before append. The marker is present in BOTH the bare and pinned-npx
+// forms, so the de-dup survives a global-install <-> npx-install
+// transition (and across version bumps).
+//
+// Why match on the `command` field rather than JSON.stringify(entry):
+// the wider marker would silently delete an unrelated hook whose args
+// or matcher happen to mention the bin name (e.g. a logger). Scoping
+// to `command` is narrower and equally idempotent for our writes since
+// we always write the marker into `command`.
+const KEEPERHUB_HOOK_MARKER = HOOK_BIN;
+
+type PreToolUseLikeEntry = {
+  hooks?: Array<{ command?: unknown }>;
+};
+
+/**
+ * Drop only the `hooks[]` items that reference the keeperhub bin, leaving
+ * sibling commands inside the same `PreToolUse` element intact. Returns
+ * the (possibly modified) entry, or null when every `hooks[]` item was
+ * keeperhub-related and the whole element should be removed.
+ *
+ * Why per-item: a user may merge our hook into a single `PreToolUse`
+ * element alongside their own commands, e.g.:
+ *
+ *   { matcher: "*", hooks: [
+ *       { type: "command", command: "/usr/local/bin/audit-logger" },
+ *       { type: "command", command: "keeperhub-wallet-hook" } ] }
+ *
+ * Dropping the whole element on re-install would silently delete the
+ * audit-logger sibling. Dropping only matching items preserves it.
+ *
+ * Non-object entries and entries without a `hooks[]` array are returned
+ * unchanged — we never inspect or mutate shapes we don't recognise.
+ */
+function filterKeeperhubHooksFromEntry(entry: unknown): unknown {
+  if (typeof entry !== "object" || entry === null) {
+    return entry;
+  }
+  const candidate = entry as PreToolUseLikeEntry;
+  if (!Array.isArray(candidate.hooks)) {
+    return entry;
+  }
+  const survivors = candidate.hooks.filter((h) => {
+    const cmd = h?.command;
+    return !(typeof cmd === "string" && cmd.includes(KEEPERHUB_HOOK_MARKER));
+  });
+  if (survivors.length === candidate.hooks.length) {
+    // No keeperhub hooks present in this entry — return original byte-for-byte.
+    return entry;
+  }
+  if (survivors.length === 0) {
+    // Every hook in this element was ours; drop the whole element so we
+    // don't leave a `{matcher, hooks: []}` shell behind.
+    return null;
+  }
+  return { ...candidate, hooks: survivors };
+}
+
+/**
+ * Pick the hook command to write into settings.json.
+ *
+ * Returns the bare bin name if it resolves on PATH (global install or a
+ * dev-time `npm link`), otherwise a version-pinned `npx` invocation that
+ * pulls the installer's own version of `@keeperhub/wallet` on demand.
+ * Override-able via the env var `KEEPERHUB_WALLET_HOOK_COMMAND` for
+ * test fixtures and unusual deployments (env input is trusted — it is
+ * written verbatim into settings.json and executed by the user's shell).
+ */
+export function resolveHookCommand(): string {
+  const envOverride = process.env.KEEPERHUB_WALLET_HOOK_COMMAND;
+  if (envOverride && envOverride.length > 0) {
+    return envOverride;
+  }
+  try {
+    // `command -v` is POSIX and avoids spawning a full shell; stdio is
+    // ignored because we only care about the exit code.
+    execFileSync("/bin/sh", ["-c", `command -v ${HOOK_BIN}`], {
+      stdio: "ignore",
+    });
+    return HOOK_COMMAND_BARE;
+  } catch {
+    return buildNpxCommand(readPackageVersion());
+  }
+}
 
 export type InstallResult = {
   skillWrites: Array<{
@@ -43,6 +177,21 @@ export type InstallOptions = {
   homeOverride?: string;
   skillSourcePath?: string;
   onNotice?: (msg: string) => void;
+  /**
+   * Hook command to write into settings.json (and reference in stderr
+   * notices for non-Claude agents). Defaults to {@link resolveHookCommand}.
+   * Override for tests, monorepo setups, or unusual deployments.
+   */
+  hookCommand?: string;
+};
+
+export type RegisterClaudeCodeHookOptions = {
+  /**
+   * Hook command to write. Defaults to {@link resolveHookCommand}. Tests
+   * pass a deterministic value to keep assertions stable across host
+   * environments (CI may or may not have the bin on PATH).
+   */
+  hookCommand?: string;
 };
 
 type ClaudeHookEntry = {
@@ -58,10 +207,10 @@ type ClaudeSettings = {
   [k: string]: unknown;
 };
 
-function buildKeeperhubEntry(): ClaudeHookEntry {
+function buildKeeperhubEntry(command: string): ClaudeHookEntry {
   return {
     matcher: "*",
-    hooks: [{ type: "command", command: HOOK_COMMAND }],
+    hooks: [{ type: "command", command }],
   };
 }
 
@@ -80,8 +229,11 @@ function defaultNotice(msg: string): void {
 }
 
 export async function registerClaudeCodeHook(
-  settingsPath: string
+  settingsPath: string,
+  options: RegisterClaudeCodeHookOptions = {}
 ): Promise<void> {
+  const command = options.hookCommand ?? resolveHookCommand();
+
   let raw: string | null = null;
   try {
     raw = await readFile(settingsPath, "utf-8");
@@ -111,17 +263,21 @@ export async function registerClaudeCodeHook(
     ? (hooks.PreToolUse as unknown[])
     : [];
 
-  // De-dup: drop any element that references keeperhub-wallet-hook in its
-  // serialised form. Covers both exact-shape matches and any legacy
-  // representations we may have written in earlier versions.
+  // De-dup: drop only the hooks[] items whose `command` field references
+  // the keeperhub-wallet-hook bin, leaving sibling commands within the
+  // same PreToolUse element untouched. Scoped to the `command` field (not
+  // the full serialised entry) so an unrelated hook that mentions the bin
+  // name in its matcher or args isn't silently deleted. Covers both the
+  // bare-bin and version-pinned npx forms, and older versions of this
+  // installer.
   const filtered: unknown[] = [];
   for (const entry of existingPreToolUse) {
-    const serialised = JSON.stringify(entry);
-    if (!serialised.includes(KEEPERHUB_HOOK_MARKER)) {
-      filtered.push(entry);
+    const survivor = filterKeeperhubHooksFromEntry(entry);
+    if (survivor !== null) {
+      filtered.push(survivor);
     }
   }
-  filtered.push(buildKeeperhubEntry());
+  filtered.push(buildKeeperhubEntry(command));
 
   hooks.PreToolUse = filtered;
   config.hooks = hooks as ClaudeSettings["hooks"];
@@ -144,8 +300,8 @@ async function writeSkillToAgent(
   return { agent: agent.agent, path: target, status: "written" };
 }
 
-function buildNoticeMessage(agent: AgentTarget): string {
-  return `${agent.agent} does not support auto-registered PreToolUse hooks; run \`${HOOK_COMMAND}\` on every tool use via ${agent.agent}'s settings file at ${agent.settingsFile}`;
+function buildNoticeMessage(agent: AgentTarget, command: string): string {
+  return `${agent.agent} does not support auto-registered PreToolUse hooks; run \`${command}\` on every tool use via ${agent.agent}'s settings file at ${agent.settingsFile}`;
 }
 
 export async function installSkill(
@@ -154,6 +310,10 @@ export async function installSkill(
   const agents = detectAgents(options.homeOverride);
   const skillSource = options.skillSourcePath ?? resolveDefaultSkillSource();
   const onNotice = options.onNotice ?? defaultNotice;
+  // Resolve once per install run so the bare-vs-npx decision stays
+  // consistent across every detected agent. Tests pass an explicit value to
+  // pin the assertion shape regardless of host PATH.
+  const hookCommand = options.hookCommand ?? resolveHookCommand();
 
   const skillWrites: InstallResult["skillWrites"] = [];
   const hookRegistrations: InstallResult["hookRegistrations"] = [];
@@ -163,13 +323,13 @@ export async function installSkill(
     skillWrites.push(write);
 
     if (agent.hookSupport === "claude-code") {
-      await registerClaudeCodeHook(agent.settingsFile);
+      await registerClaudeCodeHook(agent.settingsFile, { hookCommand });
       hookRegistrations.push({
         agent: agent.agent,
         status: "registered",
       });
     } else {
-      const message = buildNoticeMessage(agent);
+      const message = buildNoticeMessage(agent, hookCommand);
       hookRegistrations.push({
         agent: agent.agent,
         status: "notice",
