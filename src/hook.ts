@@ -23,6 +23,51 @@ function defaultToolMatcher(name: string): boolean {
 }
 
 /**
+ * Detect whether a tool input carries any payment shape — the only kind
+ * of call this hook is meant to gate. Free admin reads in the keeperhub
+ * MCP namespace (e.g. mcp__plugin_keeperhub_keeperhub__get_execution_logs,
+ * unlist_workflow, list_workflows) match the broad name regex but have
+ * no amount, no contract, no challenge — there is nothing for the safety
+ * gate to evaluate, so the hook should pass them through rather than
+ * deny with AMOUNT_UNDETERMINED.
+ *
+ * A call is "payment-shaped" when at least one of these is present:
+ *   - tool_input.paymentChallenge      (object)
+ *   - tool_input.amount                (any non-null value)
+ *   - tool_input.unit                  (any non-null value)
+ *   - tool_input.to / contract / assetAddress  (only when the value
+ *     looks like an EVM address; non-address strings such as Discord
+ *     channel ids are not payment indicators)
+ *
+ * This complements the existing tool-name regex: the regex still gates
+ * what the hook will *consider*, but presence of any payment field is
+ * required before the safety thresholds actually run. Callers that pass
+ * the regex but provide no payment context (the bug surfaced live with
+ * mcp__plugin_keeperhub_keeperhub__unlist_workflow during marketplace
+ * testing on 2026-05-01) are now allowed through.
+ */
+function hasPaymentShape(input: HookInput): boolean {
+  const ti = input.tool_input ?? {};
+  const challenge = ti.paymentChallenge;
+  if (challenge !== undefined && challenge !== null) {
+    return true;
+  }
+  if (ti.amount !== undefined && ti.amount !== null) {
+    return true;
+  }
+  if (ti.unit !== undefined && ti.unit !== null) {
+    return true;
+  }
+  for (const field of ["to", "contract", "assetAddress"] as const) {
+    const v = ti[field];
+    if (typeof v === "string" && ADDRESS_RE.test(v)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Coerce an amount field to micro-USDC. Inputs MUST be explicitly tagged with
  * `unit`:
  *  - `{amount: string, unit: "microUsdc"}` -> parsed as integer micro-USDC
@@ -156,6 +201,19 @@ export async function createPreToolUseHook(
         toolMatcher(hookInput.tool_name)
       )
     ) {
+      return { decision: "allow" };
+    }
+
+    // Pass-through for tool calls that match the wallet name regex but
+    // carry no payment context whatsoever. The default matcher
+    // /keeperhub|wallet|sign/i catches every keeperhub MCP tool by name
+    // (call_workflow, list_workflows, unlist_workflow,
+    // get_execution_logs, ...), but the bulk of those are free reads
+    // and admin operations with no amount, no contract, no challenge.
+    // Without this gate they would all fall through to the
+    // AMOUNT_UNDETERMINED branch below and DENY, breaking ordinary
+    // marketplace use of any agent that has the safety hook installed.
+    if (!hasPaymentShape(hookInput)) {
       return { decision: "allow" };
     }
 

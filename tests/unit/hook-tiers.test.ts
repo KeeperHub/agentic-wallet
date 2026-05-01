@@ -165,4 +165,105 @@ describe("createPreToolUseHook() -- auto/ask/block tiers", () => {
       reason: "AMOUNT_UNDETERMINED",
     });
   });
+
+  // Bug surfaced live during marketplace testing on 2026-05-01: every free
+  // admin MCP call (unlist_workflow, get_execution_logs, list_workflows)
+  // matched the wallet-tool name regex via the substring "keeperhub" and
+  // hit AMOUNT_UNDETERMINED, blocking ordinary use of any agent with the
+  // safety hook installed.
+  describe("pass-through for non-payment MCP calls (KEEP-392)", () => {
+    it("allows mcp keeperhub admin call with no payment shape (unlist_workflow)", async () => {
+      const hook = await buildHook();
+      const decision = await hook({
+        tool_name: "mcp__plugin_keeperhub_keeperhub__unlist_workflow",
+        tool_input: { workflowId: "abc123" },
+      });
+      expect(decision).toEqual({ decision: "allow" });
+    });
+
+    it("allows mcp keeperhub read call with no payment shape (get_execution_logs)", async () => {
+      const hook = await buildHook();
+      const decision = await hook({
+        tool_name: "mcp__plugin_keeperhub_keeperhub__get_execution_logs",
+        tool_input: { executionId: "exec_xyz" },
+      });
+      expect(decision).toEqual({ decision: "allow" });
+    });
+
+    it("allows mcp keeperhub call_workflow before any 402 (no challenge yet)", async () => {
+      const hook = await buildHook();
+      const decision = await hook({
+        tool_name: "mcp__plugin_keeperhub_keeperhub__call_workflow",
+        tool_input: { slug: "stablecoin-yield-compare-base", inputs: {} },
+      });
+      expect(decision).toEqual({ decision: "allow" });
+    });
+
+    it("does NOT pass through when paymentChallenge is present (still gates)", async () => {
+      // Same tool name as the test above, but now with payment context.
+      // Must still hit the safety thresholds — pass-through only applies
+      // when the call carries no payment shape at all.
+      const hook = await buildHook();
+      const decision = await hook({
+        tool_name: "mcp__plugin_keeperhub_keeperhub__call_workflow",
+        tool_input: {
+          slug: "expensive-workflow",
+          inputs: {},
+          paymentChallenge: {
+            amount: "200000000",
+            unit: "microUsdc",
+            payTo: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+          },
+        },
+      });
+      expect(decision).toEqual({
+        decision: "deny",
+        reason: "BLOCKED_BY_SAFETY_RULE",
+      });
+    });
+
+    it("does NOT pass through when amount is provided directly (still gates)", async () => {
+      // amount/unit at the top level is also a payment shape.
+      const hook = await buildHook();
+      const decision = await hook({
+        tool_name: "wallet-sign",
+        tool_input: {
+          amount: 200,
+          unit: "usd",
+          to: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+        },
+      });
+      expect(decision).toEqual({
+        decision: "deny",
+        reason: "BLOCKED_BY_SAFETY_RULE",
+      });
+    });
+
+    it("does NOT pass through when 'to' is an EVM contract address (still gates)", async () => {
+      // Even without amount, a contract-shaped `to` is treated as a
+      // payment indicator — preserving the existing AMOUNT_UNDETERMINED
+      // case for sign-shaped calls that omit the amount.
+      const hook = await buildHook();
+      const decision = await hook({
+        tool_name: "keeperhub-sign",
+        tool_input: { to: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" },
+      });
+      expect(decision).toEqual({
+        decision: "deny",
+        reason: "AMOUNT_UNDETERMINED",
+      });
+    });
+
+    it("DOES pass through when 'to' is a non-address string (e.g. discord channel id)", async () => {
+      // A `to` field is only a payment indicator when it looks like an
+      // EVM address. Discord channel ids, slack workspace ids, etc. must
+      // not accidentally trigger the gate.
+      const hook = await buildHook();
+      const decision = await hook({
+        tool_name: "mcp__plugin_keeperhub_keeperhub__send_discord_message",
+        tool_input: { to: "1234567890123456789", message: "hi" },
+      });
+      expect(decision).toEqual({ decision: "allow" });
+    });
+  });
 });
