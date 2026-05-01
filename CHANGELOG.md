@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.9](https://github.com/KeeperHub/agentic-wallet/compare/wallet-v0.1.8...wallet-v0.1.9) (2026-05-01)
+
+
+### Bug Fixes
+
+* **hook:** pass through MCP calls with no payment shape (KEEP-392) ([c9f05d5](https://github.com/KeeperHub/agentic-wallet/commit/c9f05d50989b4bdd6eaa834776ad06f39df7b886))
+* **hook:** pass through MCP calls with no payment shape (KEEP-392) ([5e53b1b](https://github.com/KeeperHub/agentic-wallet/commit/5e53b1b48371ff7393874e6995805daaa09bc91f))
+* **skill-install:** per-hooks[] filtering preserves foreign siblings ([7bac748](https://github.com/KeeperHub/agentic-wallet/commit/7bac748f234ee95c9dc134e3c82d38c04d6c32eb))
+* **skill-install:** pin npx version and narrow de-dup marker (review feedback) ([e6b3c19](https://github.com/KeeperHub/agentic-wallet/commit/e6b3c1945ebdceeffaafd4eb2586c04a9950c9da))
+* **skill-install:** resolve hook command at install time so npx flow works ([0161181](https://github.com/KeeperHub/agentic-wallet/commit/0161181a2784e3e140146d145b4f3997f3e16105))
+* **skill-install:** resolve hook command at install time so npx flow works ([b9c3cb1](https://github.com/KeeperHub/agentic-wallet/commit/b9c3cb17b634848770ad3e471ffd000a70df678e))
+
 ## [0.1.8](https://github.com/KeeperHub/agentic-wallet/compare/wallet-v0.1.7...wallet-v0.1.8) (2026-04-29)
 
 
