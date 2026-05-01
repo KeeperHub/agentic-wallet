@@ -31,7 +31,8 @@ import {
 } from "../../src/skill-install.js";
 
 const TEST_HOOK_COMMAND = "keeperhub-wallet-hook";
-const TEST_NPX_COMMAND = "npx -y -p @keeperhub/wallet keeperhub-wallet-hook";
+const TEST_NPX_COMMAND =
+  "npx -y -p @keeperhub/wallet@9.9.9-test keeperhub-wallet-hook";
 
 type PreToolUseEntry = {
   matcher: string;
@@ -189,6 +190,76 @@ describe("registerClaudeCodeHook()", () => {
       TEST_NPX_COMMAND
     );
   });
+
+  it("preserves an unrelated hook whose matcher mentions the bin name", async () => {
+    // Reviewer 2 finding: scoping de-dup to the `command` field avoids
+    // silently deleting a foreign hook whose matcher (or other non-command
+    // metadata) happens to mention "keeperhub-wallet-hook". Only hooks
+    // whose `command` references the bin should be replaced.
+    //
+    // Seed a foreign entry where the bin name appears ONLY in the matcher
+    // string. Under the previous JSON-stringify marker this would be
+    // wiped; under the new command-scoped marker it must survive.
+    const settingsPath = join(fakeHome, ".claude", "settings.json");
+    const foreignCommand = "/usr/local/bin/audit-logger --kind=pretool";
+    const seed = {
+      hooks: {
+        PreToolUse: [
+          {
+            // Matcher includes the bin name as a tag — purely metadata,
+            // not a reference to our installed hook command. The command
+            // itself is unrelated and must survive re-install.
+            matcher: "Bash:keeperhub-wallet-hook-pretool",
+            hooks: [{ type: "command", command: foreignCommand }],
+          },
+        ],
+      },
+    };
+    await writeFile(settingsPath, JSON.stringify(seed, null, 2));
+
+    await registerClaudeCodeHook(settingsPath, {
+      hookCommand: TEST_HOOK_COMMAND,
+    });
+
+    const raw = await readFile(settingsPath, "utf-8");
+    const parsed = JSON.parse(raw) as SettingsShape;
+    // Both entries must coexist — the foreign one and ours.
+    expect(parsed.hooks?.PreToolUse).toHaveLength(2);
+    const commands = parsed.hooks?.PreToolUse?.map(
+      (e) => e.hooks[0].command
+    );
+    expect(commands).toContain(foreignCommand);
+    expect(commands).toContain(TEST_HOOK_COMMAND);
+  });
+
+  it("still de-dups when the foreign-looking entry has the bin in its actual command", async () => {
+    // Inverse of the previous test: if a previous installer wrote the
+    // bin name into `command` (the only place we care about), it MUST
+    // be replaced regardless of matcher or other fields.
+    const settingsPath = join(fakeHome, ".claude", "settings.json");
+    const seed = {
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: "Bash",
+            hooks: [{ type: "command", command: "/old/path/keeperhub-wallet-hook" }],
+          },
+        ],
+      },
+    };
+    await writeFile(settingsPath, JSON.stringify(seed, null, 2));
+
+    await registerClaudeCodeHook(settingsPath, {
+      hookCommand: TEST_HOOK_COMMAND,
+    });
+
+    const raw = await readFile(settingsPath, "utf-8");
+    const parsed = JSON.parse(raw) as SettingsShape;
+    expect(parsed.hooks?.PreToolUse).toHaveLength(1);
+    expect(parsed.hooks?.PreToolUse?.[0].hooks[0].command).toBe(
+      TEST_HOOK_COMMAND
+    );
+  });
 });
 
 describe("resolveHookCommand()", () => {
@@ -217,6 +288,32 @@ describe("resolveHookCommand()", () => {
     // PATH probe outcome depends on host, so just assert the override was
     // ignored — the result must contain the bin name in either form.
     expect(resolveHookCommand()).toContain("keeperhub-wallet-hook");
+  });
+
+  it("pins npx to the installer's package version (no implicit @latest)", () => {
+    // Reviewer 2 finding: pulling `latest` on every PreToolUse fire is a
+    // supply-chain risk. Force the npx fallback by pointing the env-driven
+    // PATH at an empty directory so `command -v` cannot resolve the bin.
+    delete process.env.KEEPERHUB_WALLET_HOOK_COMMAND;
+    const originalPath = process.env.PATH;
+    process.env.PATH = "/var/empty";
+    try {
+      const cmd = resolveHookCommand();
+      expect(cmd.startsWith("npx -y -p @keeperhub/wallet@")).toBe(true);
+      // Must NOT pin to @latest — the installer's own version is the
+      // upper bound on supply-chain trust.
+      expect(cmd).not.toContain("@keeperhub/wallet@latest");
+      expect(cmd).not.toContain("@keeperhub/wallet keeperhub-wallet-hook");
+      // Sanity: the pinned segment must look like a semver-ish token, not
+      // an empty placeholder.
+      const match = cmd.match(/@keeperhub\/wallet@([^\s]+)/);
+      expect(match).not.toBeNull();
+      const pinned = match?.[1] ?? "";
+      expect(pinned.length).toBeGreaterThan(0);
+      expect(pinned).not.toBe("latest");
+    } finally {
+      process.env.PATH = originalPath;
+    }
   });
 });
 

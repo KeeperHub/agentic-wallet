@@ -28,25 +28,92 @@
 
 import { execFileSync } from "node:child_process";
 import { chmod, copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type AgentTarget, detectAgents } from "./agent-detect.js";
 
 const HOOK_BIN = "keeperhub-wallet-hook";
 const HOOK_COMMAND_BARE = HOOK_BIN;
-const HOOK_COMMAND_NPX = `npx -y -p @keeperhub/wallet ${HOOK_BIN}`;
-// Match rule for de-dup: any existing PreToolUse entry whose JSON form
-// mentions this string is considered "ours" and is removed before append.
-// Both HOOK_COMMAND_BARE and HOOK_COMMAND_NPX contain it.
+const PACKAGE_NAME = "@keeperhub/wallet";
+
+/**
+ * Read the installer's own version from package.json so the npx command
+ * pins to it. Pinning matters because `npx -y` would otherwise pull
+ * `latest` on every PreToolUse hook fire — any future compromise of the
+ * `@keeperhub/wallet` scope on the npm registry would be executed on
+ * every tool call by every npx-installed user. Pinning to the version
+ * shipped at install time makes upgrades explicit (re-run skill install)
+ * and bounds the supply-chain blast radius to "code that was already
+ * trusted enough to install".
+ *
+ * Falls back to "latest" only if package.json cannot be located, which
+ * should never happen in published builds (dist/ sits next to package.json
+ * via pkg.files). The fallback exists so test runs from src/ — where the
+ * resolution path is `here/../package.json` — never crash the installer.
+ */
+function readPackageVersion(): string {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    // Module lives in dist/ at runtime and src/ during tests; in both cases
+    // package.json is one level up.
+    const pkgPath = join(here, "..", "package.json");
+    const raw = readFileSync(pkgPath, "utf-8");
+    const parsed = JSON.parse(raw) as { version?: string };
+    if (typeof parsed.version === "string" && parsed.version.length > 0) {
+      return parsed.version;
+    }
+  } catch {
+    // Fall through.
+  }
+  return "latest";
+}
+
+function buildNpxCommand(version: string): string {
+  return `npx -y -p ${PACKAGE_NAME}@${version} ${HOOK_BIN}`;
+}
+
+// Match rule for de-dup: any existing PreToolUse entry whose `command`
+// string contains this substring is considered "ours" and is removed
+// before append. The marker is present in BOTH the bare and pinned-npx
+// forms, so the de-dup survives a global-install <-> npx-install
+// transition (and across version bumps).
+//
+// Why match on the `command` field rather than JSON.stringify(entry):
+// the wider marker would silently delete an unrelated hook whose args
+// or matcher happen to mention the bin name (e.g. a logger). Scoping
+// to `command` is narrower and equally idempotent for our writes since
+// we always write the marker into `command`.
 const KEEPERHUB_HOOK_MARKER = HOOK_BIN;
+
+type PreToolUseLikeEntry = {
+  hooks?: Array<{ command?: unknown }>;
+};
+
+function entryReferencesKeeperhubHook(entry: unknown): boolean {
+  if (typeof entry !== "object" || entry === null) {
+    return false;
+  }
+  const candidate = entry as PreToolUseLikeEntry;
+  const hooks = Array.isArray(candidate.hooks) ? candidate.hooks : [];
+  for (const h of hooks) {
+    const cmd = h?.command;
+    if (typeof cmd === "string" && cmd.includes(KEEPERHUB_HOOK_MARKER)) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /**
  * Pick the hook command to write into settings.json.
  *
  * Returns the bare bin name if it resolves on PATH (global install or a
- * dev-time `npm link`), otherwise an `npx` invocation that pulls the same
- * package on demand. Override-able via the env var
- * `KEEPERHUB_WALLET_HOOK_COMMAND` for test fixtures and unusual deployments.
+ * dev-time `npm link`), otherwise a version-pinned `npx` invocation that
+ * pulls the installer's own version of `@keeperhub/wallet` on demand.
+ * Override-able via the env var `KEEPERHUB_WALLET_HOOK_COMMAND` for
+ * test fixtures and unusual deployments (env input is trusted — it is
+ * written verbatim into settings.json and executed by the user's shell).
  */
 export function resolveHookCommand(): string {
   const envOverride = process.env.KEEPERHUB_WALLET_HOOK_COMMAND;
@@ -61,7 +128,7 @@ export function resolveHookCommand(): string {
     });
     return HOOK_COMMAND_BARE;
   } catch {
-    return HOOK_COMMAND_NPX;
+    return buildNpxCommand(readPackageVersion());
   }
 }
 
@@ -168,14 +235,14 @@ export async function registerClaudeCodeHook(
     ? (hooks.PreToolUse as unknown[])
     : [];
 
-  // De-dup: drop any element that references keeperhub-wallet-hook in its
-  // serialised form. Covers both exact-shape matches and any legacy
-  // representations we may have written in earlier versions, including the
-  // global-bin and npx forms.
+  // De-dup: drop any element whose command field references the
+  // keeperhub-wallet-hook bin. Scoped to the `command` field (not the full
+  // serialised entry) so an unrelated hook that mentions the bin name in
+  // its matcher or args isn't silently deleted. Covers both the bare-bin
+  // and version-pinned npx forms, and older versions of this installer.
   const filtered: unknown[] = [];
   for (const entry of existingPreToolUse) {
-    const serialised = JSON.stringify(entry);
-    if (!serialised.includes(KEEPERHUB_HOOK_MARKER)) {
+    if (!entryReferencesKeeperhubHook(entry)) {
       filtered.push(entry);
     }
   }

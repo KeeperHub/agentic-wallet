@@ -14,9 +14,11 @@ npx @keeperhub/wallet add
 The installer probes `PATH` and chooses the form that will resolve later when your shell fires the hook:
 
 - If `keeperhub-wallet-hook` is on `PATH` (global install or `npm link`), the installer writes the bare command for lowest startup latency.
-- Otherwise (the typical `npx @keeperhub/wallet skill install` flow, where the bin is only inside an `npx` cache), it writes `npx -y -p @keeperhub/wallet keeperhub-wallet-hook` so the hook resolves on every fire without a global install.
+- Otherwise (the typical `npx @keeperhub/wallet skill install` flow, where the bin is only inside an `npx` cache), it writes `npx -y -p @keeperhub/wallet@<version> keeperhub-wallet-hook` so the hook resolves on every fire without a global install.
 
-Override with `KEEPERHUB_WALLET_HOOK_COMMAND` if you need a different command (monorepo bin path, wrapper script, etc.). Re-running `skill install` is idempotent across either form — switching from a global install to npx (or vice versa) replaces the existing entry rather than duplicating it.
+The `npx` form is **pinned to the installer's own version** — never `@latest`. Pinning bounds supply-chain risk: `npx -y` runs whatever is in the registry, so a `latest`-pulling hook would execute new code on every tool call after any future scope compromise. To upgrade, re-run `skill install` from a fresh `npx @keeperhub/wallet@<new-version>`.
+
+Override with `KEEPERHUB_WALLET_HOOK_COMMAND` if you need a different command (monorepo bin path, wrapper script, etc.) — it is written verbatim into `settings.json`, so treat it as trusted input. Re-running `skill install` is idempotent across either form: switching between global, npx, or version-bumped npx replaces the existing entry rather than duplicating it. The de-dup matcher only inspects the `command` field of each hook, so unrelated entries that mention `keeperhub-wallet-hook` in their `matcher` or args are preserved.
 
 ## First use
 
