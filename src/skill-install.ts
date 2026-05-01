@@ -5,26 +5,65 @@
 //     detected agent's skills directory and, for Claude Code, registers a
 //     PreToolUse hook pointing at `keeperhub-wallet-hook` in
 //     ~/.claude/settings.json. For non-claude agents, emits a stderr notice.
-//   - registerClaudeCodeHook(settingsPath) -- pure settings.json patcher
-//     used internally; exported so tests can drive it directly.
+//   - registerClaudeCodeHook(settingsPath, options?) -- pure settings.json
+//     patcher used internally; exported so tests can drive it directly.
+//
+// Hook command resolution: the README's recommended install path is
+// `npx @keeperhub/wallet skill install`, which does not put the bin on the
+// system PATH. If we wrote a bare `keeperhub-wallet-hook` command in that
+// case, the hook would fire `command not found` on every tool call. So at
+// install time we probe PATH; if the bin resolves we keep the bare command
+// (lowest startup latency), otherwise we fall back to an `npx` invocation
+// that resolves regardless of where future shells run.
 //
 // Idempotency rule: re-running the installer MUST NOT create a duplicate
 // hook entry. We filter any existing array element whose serialised form
 // contains `keeperhub-wallet-hook` before appending a single fresh record.
+// The marker substring is present in BOTH the bare and npx forms, so the
+// de-dup survives a global-install → npx-install transition (and back).
 //
 // Preservation rule: all top-level keys in settings.json other than
 // hooks.PreToolUse MUST be byte-preserved. We only ever touch
 // hooks.PreToolUse; any foreign hooks.PostToolUse entries survive verbatim.
 
+import { execFileSync } from "node:child_process";
 import { chmod, copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type AgentTarget, detectAgents } from "./agent-detect.js";
 
-const HOOK_COMMAND = "keeperhub-wallet-hook";
+const HOOK_BIN = "keeperhub-wallet-hook";
+const HOOK_COMMAND_BARE = HOOK_BIN;
+const HOOK_COMMAND_NPX = `npx -y -p @keeperhub/wallet ${HOOK_BIN}`;
 // Match rule for de-dup: any existing PreToolUse entry whose JSON form
 // mentions this string is considered "ours" and is removed before append.
-const KEEPERHUB_HOOK_MARKER = "keeperhub-wallet-hook";
+// Both HOOK_COMMAND_BARE and HOOK_COMMAND_NPX contain it.
+const KEEPERHUB_HOOK_MARKER = HOOK_BIN;
+
+/**
+ * Pick the hook command to write into settings.json.
+ *
+ * Returns the bare bin name if it resolves on PATH (global install or a
+ * dev-time `npm link`), otherwise an `npx` invocation that pulls the same
+ * package on demand. Override-able via the env var
+ * `KEEPERHUB_WALLET_HOOK_COMMAND` for test fixtures and unusual deployments.
+ */
+export function resolveHookCommand(): string {
+  const envOverride = process.env.KEEPERHUB_WALLET_HOOK_COMMAND;
+  if (envOverride && envOverride.length > 0) {
+    return envOverride;
+  }
+  try {
+    // `command -v` is POSIX and avoids spawning a full shell; stdio is
+    // ignored because we only care about the exit code.
+    execFileSync("/bin/sh", ["-c", `command -v ${HOOK_BIN}`], {
+      stdio: "ignore",
+    });
+    return HOOK_COMMAND_BARE;
+  } catch {
+    return HOOK_COMMAND_NPX;
+  }
+}
 
 export type InstallResult = {
   skillWrites: Array<{
@@ -43,6 +82,21 @@ export type InstallOptions = {
   homeOverride?: string;
   skillSourcePath?: string;
   onNotice?: (msg: string) => void;
+  /**
+   * Hook command to write into settings.json (and reference in stderr
+   * notices for non-Claude agents). Defaults to {@link resolveHookCommand}.
+   * Override for tests, monorepo setups, or unusual deployments.
+   */
+  hookCommand?: string;
+};
+
+export type RegisterClaudeCodeHookOptions = {
+  /**
+   * Hook command to write. Defaults to {@link resolveHookCommand}. Tests
+   * pass a deterministic value to keep assertions stable across host
+   * environments (CI may or may not have the bin on PATH).
+   */
+  hookCommand?: string;
 };
 
 type ClaudeHookEntry = {
@@ -58,10 +112,10 @@ type ClaudeSettings = {
   [k: string]: unknown;
 };
 
-function buildKeeperhubEntry(): ClaudeHookEntry {
+function buildKeeperhubEntry(command: string): ClaudeHookEntry {
   return {
     matcher: "*",
-    hooks: [{ type: "command", command: HOOK_COMMAND }],
+    hooks: [{ type: "command", command }],
   };
 }
 
@@ -80,8 +134,11 @@ function defaultNotice(msg: string): void {
 }
 
 export async function registerClaudeCodeHook(
-  settingsPath: string
+  settingsPath: string,
+  options: RegisterClaudeCodeHookOptions = {}
 ): Promise<void> {
+  const command = options.hookCommand ?? resolveHookCommand();
+
   let raw: string | null = null;
   try {
     raw = await readFile(settingsPath, "utf-8");
@@ -113,7 +170,8 @@ export async function registerClaudeCodeHook(
 
   // De-dup: drop any element that references keeperhub-wallet-hook in its
   // serialised form. Covers both exact-shape matches and any legacy
-  // representations we may have written in earlier versions.
+  // representations we may have written in earlier versions, including the
+  // global-bin and npx forms.
   const filtered: unknown[] = [];
   for (const entry of existingPreToolUse) {
     const serialised = JSON.stringify(entry);
@@ -121,7 +179,7 @@ export async function registerClaudeCodeHook(
       filtered.push(entry);
     }
   }
-  filtered.push(buildKeeperhubEntry());
+  filtered.push(buildKeeperhubEntry(command));
 
   hooks.PreToolUse = filtered;
   config.hooks = hooks as ClaudeSettings["hooks"];
@@ -144,8 +202,8 @@ async function writeSkillToAgent(
   return { agent: agent.agent, path: target, status: "written" };
 }
 
-function buildNoticeMessage(agent: AgentTarget): string {
-  return `${agent.agent} does not support auto-registered PreToolUse hooks; run \`${HOOK_COMMAND}\` on every tool use via ${agent.agent}'s settings file at ${agent.settingsFile}`;
+function buildNoticeMessage(agent: AgentTarget, command: string): string {
+  return `${agent.agent} does not support auto-registered PreToolUse hooks; run \`${command}\` on every tool use via ${agent.agent}'s settings file at ${agent.settingsFile}`;
 }
 
 export async function installSkill(
@@ -154,6 +212,10 @@ export async function installSkill(
   const agents = detectAgents(options.homeOverride);
   const skillSource = options.skillSourcePath ?? resolveDefaultSkillSource();
   const onNotice = options.onNotice ?? defaultNotice;
+  // Resolve once per install run so the bare-vs-npx decision stays
+  // consistent across every detected agent. Tests pass an explicit value to
+  // pin the assertion shape regardless of host PATH.
+  const hookCommand = options.hookCommand ?? resolveHookCommand();
 
   const skillWrites: InstallResult["skillWrites"] = [];
   const hookRegistrations: InstallResult["hookRegistrations"] = [];
@@ -163,13 +225,13 @@ export async function installSkill(
     skillWrites.push(write);
 
     if (agent.hookSupport === "claude-code") {
-      await registerClaudeCodeHook(agent.settingsFile);
+      await registerClaudeCodeHook(agent.settingsFile, { hookCommand });
       hookRegistrations.push({
         agent: agent.agent,
         status: "registered",
       });
     } else {
-      const message = buildNoticeMessage(agent);
+      const message = buildNoticeMessage(agent, hookCommand);
       hookRegistrations.push({
         agent: agent.agent,
         status: "notice",

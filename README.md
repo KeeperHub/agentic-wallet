@@ -11,6 +11,13 @@ npx @keeperhub/wallet add
 
 `skill install` writes the skill file into every detected agent directory AND registers the `keeperhub-wallet-hook` PreToolUse safety hook in `~/.claude/settings.json`. The alternate `npx skills add keeperhub/agentic-wallet-skills` path installs the skill file only — if you use it, follow up with `npx @keeperhub/wallet skill install` to activate the safety hook.
 
+The installer probes `PATH` and chooses the form that will resolve later when your shell fires the hook:
+
+- If `keeperhub-wallet-hook` is on `PATH` (global install or `npm link`), the installer writes the bare command for lowest startup latency.
+- Otherwise (the typical `npx @keeperhub/wallet skill install` flow, where the bin is only inside an `npx` cache), it writes `npx -y -p @keeperhub/wallet keeperhub-wallet-hook` so the hook resolves on every fire without a global install.
+
+Override with `KEEPERHUB_WALLET_HOOK_COMMAND` if you need a different command (monorepo bin path, wrapper script, etc.). Re-running `skill install` is idempotent across either form — switching from a global install to npx (or vice versa) replaces the existing entry rather than duplicating it.
+
 ## First use
 
 ```ts

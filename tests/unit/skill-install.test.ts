@@ -5,6 +5,13 @@
 //   across two invocations, preserves foreign keys, rejects malformed JSON
 // - installSkill: copies skill bytes into every detected skillsDir and
 //   emits notices for non-Claude agents without touching their settings.
+// - resolveHookCommand: env override beats PATH probe; PATH-not-found
+//   falls back to npx; previously-written hook entries (regardless of
+//   command form) are de-duped on re-install.
+//
+// Test isolation: every test that calls registerClaudeCodeHook or
+// installSkill passes an explicit `hookCommand` so assertions stay stable
+// whether or not CI happens to have @keeperhub/wallet on PATH.
 
 import {
   mkdir,
@@ -20,7 +27,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   installSkill,
   registerClaudeCodeHook,
+  resolveHookCommand,
 } from "../../src/skill-install.js";
+
+const TEST_HOOK_COMMAND = "keeperhub-wallet-hook";
+const TEST_NPX_COMMAND = "npx -y -p @keeperhub/wallet keeperhub-wallet-hook";
 
 type PreToolUseEntry = {
   matcher: string;
@@ -59,7 +70,9 @@ afterEach(async () => {
 describe("registerClaudeCodeHook()", () => {
   it("creates settings.json with mode 0o600 and one PreToolUse entry when missing", async () => {
     const settingsPath = join(fakeHome, ".claude", "settings.json");
-    await registerClaudeCodeHook(settingsPath);
+    await registerClaudeCodeHook(settingsPath, {
+      hookCommand: TEST_HOOK_COMMAND,
+    });
 
     const st = await stat(settingsPath);
     expect(st.mode & 0o777).toBe(0o600);
@@ -69,20 +82,24 @@ describe("registerClaudeCodeHook()", () => {
     expect(parsed.hooks?.PreToolUse).toHaveLength(1);
     expect(parsed.hooks?.PreToolUse?.[0].matcher).toBe("*");
     expect(parsed.hooks?.PreToolUse?.[0].hooks[0].command).toBe(
-      "keeperhub-wallet-hook"
+      TEST_HOOK_COMMAND
     );
   });
 
   it("is idempotent: two invocations produce exactly one hook entry", async () => {
     const settingsPath = join(fakeHome, ".claude", "settings.json");
-    await registerClaudeCodeHook(settingsPath);
-    await registerClaudeCodeHook(settingsPath);
+    await registerClaudeCodeHook(settingsPath, {
+      hookCommand: TEST_HOOK_COMMAND,
+    });
+    await registerClaudeCodeHook(settingsPath, {
+      hookCommand: TEST_HOOK_COMMAND,
+    });
 
     const raw = await readFile(settingsPath, "utf-8");
     const parsed = JSON.parse(raw) as SettingsShape;
     expect(parsed.hooks?.PreToolUse).toHaveLength(1);
     expect(parsed.hooks?.PreToolUse?.[0].hooks[0].command).toBe(
-      "keeperhub-wallet-hook"
+      TEST_HOOK_COMMAND
     );
   });
 
@@ -106,7 +123,9 @@ describe("registerClaudeCodeHook()", () => {
     };
     await writeFile(settingsPath, JSON.stringify(seed, null, 2));
 
-    await registerClaudeCodeHook(settingsPath);
+    await registerClaudeCodeHook(settingsPath, {
+      hookCommand: TEST_HOOK_COMMAND,
+    });
 
     const raw = await readFile(settingsPath, "utf-8");
     const parsed = JSON.parse(raw) as SettingsShape;
@@ -118,7 +137,7 @@ describe("registerClaudeCodeHook()", () => {
     expect(parsed.hooks?.PostToolUse).toEqual(seed.hooks.PostToolUse);
     expect(parsed.hooks?.PreToolUse).toHaveLength(1);
     expect(parsed.hooks?.PreToolUse?.[0].hooks[0].command).toBe(
-      "keeperhub-wallet-hook"
+      TEST_HOOK_COMMAND
     );
   });
 
@@ -128,12 +147,76 @@ describe("registerClaudeCodeHook()", () => {
     await writeFile(settingsPath, bogus);
     const before = await readFile(settingsPath, "utf-8");
 
-    await expect(registerClaudeCodeHook(settingsPath)).rejects.toThrow(
-      NOT_VALID_JSON_RE
-    );
+    await expect(
+      registerClaudeCodeHook(settingsPath, {
+        hookCommand: TEST_HOOK_COMMAND,
+      })
+    ).rejects.toThrow(NOT_VALID_JSON_RE);
 
     const after = await readFile(settingsPath, "utf-8");
     expect(after).toBe(before);
+  });
+
+  it("writes the npx form when the resolver returns it (simulates non-global install)", async () => {
+    const settingsPath = join(fakeHome, ".claude", "settings.json");
+    await registerClaudeCodeHook(settingsPath, {
+      hookCommand: TEST_NPX_COMMAND,
+    });
+
+    const raw = await readFile(settingsPath, "utf-8");
+    const parsed = JSON.parse(raw) as SettingsShape;
+    expect(parsed.hooks?.PreToolUse?.[0].hooks[0].command).toBe(
+      TEST_NPX_COMMAND
+    );
+  });
+
+  it("de-dups across bare-vs-npx command transitions on re-install", async () => {
+    // Simulate a user who first installed globally (bare command) and then
+    // re-ran via npx: the second register call must REPLACE the first
+    // entry, not append a duplicate.
+    const settingsPath = join(fakeHome, ".claude", "settings.json");
+    await registerClaudeCodeHook(settingsPath, {
+      hookCommand: TEST_HOOK_COMMAND,
+    });
+    await registerClaudeCodeHook(settingsPath, {
+      hookCommand: TEST_NPX_COMMAND,
+    });
+
+    const raw = await readFile(settingsPath, "utf-8");
+    const parsed = JSON.parse(raw) as SettingsShape;
+    expect(parsed.hooks?.PreToolUse).toHaveLength(1);
+    expect(parsed.hooks?.PreToolUse?.[0].hooks[0].command).toBe(
+      TEST_NPX_COMMAND
+    );
+  });
+});
+
+describe("resolveHookCommand()", () => {
+  let originalEnv: string | undefined;
+
+  beforeEach(() => {
+    originalEnv = process.env.KEEPERHUB_WALLET_HOOK_COMMAND;
+  });
+
+  afterEach(() => {
+    if (originalEnv === undefined) {
+      delete process.env.KEEPERHUB_WALLET_HOOK_COMMAND;
+    } else {
+      process.env.KEEPERHUB_WALLET_HOOK_COMMAND = originalEnv;
+    }
+  });
+
+  it("honours KEEPERHUB_WALLET_HOOK_COMMAND env override before probing PATH", () => {
+    const sentinel = "/opt/custom/bin/keeperhub-wallet-hook --flag";
+    process.env.KEEPERHUB_WALLET_HOOK_COMMAND = sentinel;
+    expect(resolveHookCommand()).toBe(sentinel);
+  });
+
+  it("ignores an empty env override and falls through to PATH probe", () => {
+    process.env.KEEPERHUB_WALLET_HOOK_COMMAND = "";
+    // PATH probe outcome depends on host, so just assert the override was
+    // ignored — the result must contain the bin name in either form.
+    expect(resolveHookCommand()).toContain("keeperhub-wallet-hook");
   });
 });
 

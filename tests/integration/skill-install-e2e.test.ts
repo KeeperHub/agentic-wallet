@@ -67,17 +67,29 @@ function buildSeed(): SeededSettings {
 
 let fakeHome: string;
 let originalHome: string | undefined;
+let originalHookCommand: string | undefined;
 
 beforeEach(async () => {
   originalHome = process.env.HOME;
+  originalHookCommand = process.env.KEEPERHUB_WALLET_HOOK_COMMAND;
   fakeHome = await mkdtemp(join(tmpdir(), "kh-skill-install-e2e-"));
   process.env.HOME = fakeHome;
+  // Pin the hook command so assertions stay stable regardless of whether
+  // the host that runs the test happens to have @keeperhub/wallet on PATH
+  // (laptop with global install) or not (CI sandbox). The env override is
+  // tested separately in tests/unit/skill-install.test.ts.
+  process.env.KEEPERHUB_WALLET_HOOK_COMMAND = "keeperhub-wallet-hook";
   await mkdir(join(fakeHome, ".claude"), { recursive: true });
   await mkdir(join(fakeHome, ".cursor"), { recursive: true });
 });
 
 afterEach(async () => {
   process.env.HOME = originalHome;
+  if (originalHookCommand === undefined) {
+    delete process.env.KEEPERHUB_WALLET_HOOK_COMMAND;
+  } else {
+    process.env.KEEPERHUB_WALLET_HOOK_COMMAND = originalHookCommand;
+  }
   await rm(fakeHome, { recursive: true, force: true });
 });
 
