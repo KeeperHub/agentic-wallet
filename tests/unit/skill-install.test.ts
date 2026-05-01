@@ -260,6 +260,82 @@ describe("registerClaudeCodeHook()", () => {
       TEST_HOOK_COMMAND
     );
   });
+
+  it("preserves foreign sibling hooks[] inside the same PreToolUse element on re-install", async () => {
+    // Reviewer follow-up: if a user merged our hook into an existing
+    // PreToolUse element so it lives alongside their own commands,
+    // dropping the whole element on re-install would silently delete
+    // their unrelated sibling. Filter only the matching hooks[] items,
+    // leaving siblings intact.
+    const settingsPath = join(fakeHome, ".claude", "settings.json");
+    const auditCommand = "/usr/local/bin/audit-logger --on=pretool";
+    const seed = {
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: "*",
+            hooks: [
+              { type: "command", command: auditCommand },
+              { type: "command", command: "/old/path/keeperhub-wallet-hook" },
+            ],
+          },
+        ],
+      },
+    };
+    await writeFile(settingsPath, JSON.stringify(seed, null, 2));
+
+    await registerClaudeCodeHook(settingsPath, {
+      hookCommand: TEST_HOOK_COMMAND,
+    });
+
+    const raw = await readFile(settingsPath, "utf-8");
+    const parsed = JSON.parse(raw) as SettingsShape;
+    // Original element keeps its foreign sibling and loses our old hook;
+    // a new element carrying our refreshed hook is appended.
+    expect(parsed.hooks?.PreToolUse).toHaveLength(2);
+    const surviving = parsed.hooks?.PreToolUse?.[0];
+    expect(surviving?.matcher).toBe("*");
+    expect(surviving?.hooks).toHaveLength(1);
+    expect(surviving?.hooks[0].command).toBe(auditCommand);
+    const ours = parsed.hooks?.PreToolUse?.[1];
+    expect(ours?.hooks[0].command).toBe(TEST_HOOK_COMMAND);
+  });
+
+  it("drops the whole PreToolUse element only when every hooks[] item was ours", async () => {
+    // Mirror case: when there are NO surviving siblings, the now-empty
+    // shell {matcher, hooks: []} must not be left behind.
+    const settingsPath = join(fakeHome, ".claude", "settings.json");
+    const seed = {
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: "Bash",
+            hooks: [
+              { type: "command", command: "/old/path/keeperhub-wallet-hook" },
+              {
+                type: "command",
+                command:
+                  "npx -y -p @keeperhub/wallet@0.1.7 keeperhub-wallet-hook",
+              },
+            ],
+          },
+        ],
+      },
+    };
+    await writeFile(settingsPath, JSON.stringify(seed, null, 2));
+
+    await registerClaudeCodeHook(settingsPath, {
+      hookCommand: TEST_HOOK_COMMAND,
+    });
+
+    const raw = await readFile(settingsPath, "utf-8");
+    const parsed = JSON.parse(raw) as SettingsShape;
+    // Original element fully dropped; only the freshly-appended one remains.
+    expect(parsed.hooks?.PreToolUse).toHaveLength(1);
+    expect(parsed.hooks?.PreToolUse?.[0].hooks[0].command).toBe(
+      TEST_HOOK_COMMAND
+    );
+  });
 });
 
 describe("resolveHookCommand()", () => {

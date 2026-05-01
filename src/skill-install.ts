@@ -90,19 +90,47 @@ type PreToolUseLikeEntry = {
   hooks?: Array<{ command?: unknown }>;
 };
 
-function entryReferencesKeeperhubHook(entry: unknown): boolean {
+/**
+ * Drop only the `hooks[]` items that reference the keeperhub bin, leaving
+ * sibling commands inside the same `PreToolUse` element intact. Returns
+ * the (possibly modified) entry, or null when every `hooks[]` item was
+ * keeperhub-related and the whole element should be removed.
+ *
+ * Why per-item: a user may merge our hook into a single `PreToolUse`
+ * element alongside their own commands, e.g.:
+ *
+ *   { matcher: "*", hooks: [
+ *       { type: "command", command: "/usr/local/bin/audit-logger" },
+ *       { type: "command", command: "keeperhub-wallet-hook" } ] }
+ *
+ * Dropping the whole element on re-install would silently delete the
+ * audit-logger sibling. Dropping only matching items preserves it.
+ *
+ * Non-object entries and entries without a `hooks[]` array are returned
+ * unchanged — we never inspect or mutate shapes we don't recognise.
+ */
+function filterKeeperhubHooksFromEntry(entry: unknown): unknown {
   if (typeof entry !== "object" || entry === null) {
-    return false;
+    return entry;
   }
   const candidate = entry as PreToolUseLikeEntry;
-  const hooks = Array.isArray(candidate.hooks) ? candidate.hooks : [];
-  for (const h of hooks) {
-    const cmd = h?.command;
-    if (typeof cmd === "string" && cmd.includes(KEEPERHUB_HOOK_MARKER)) {
-      return true;
-    }
+  if (!Array.isArray(candidate.hooks)) {
+    return entry;
   }
-  return false;
+  const survivors = candidate.hooks.filter((h) => {
+    const cmd = h?.command;
+    return !(typeof cmd === "string" && cmd.includes(KEEPERHUB_HOOK_MARKER));
+  });
+  if (survivors.length === candidate.hooks.length) {
+    // No keeperhub hooks present in this entry — return original byte-for-byte.
+    return entry;
+  }
+  if (survivors.length === 0) {
+    // Every hook in this element was ours; drop the whole element so we
+    // don't leave a `{matcher, hooks: []}` shell behind.
+    return null;
+  }
+  return { ...candidate, hooks: survivors };
 }
 
 /**
@@ -235,15 +263,18 @@ export async function registerClaudeCodeHook(
     ? (hooks.PreToolUse as unknown[])
     : [];
 
-  // De-dup: drop any element whose command field references the
-  // keeperhub-wallet-hook bin. Scoped to the `command` field (not the full
-  // serialised entry) so an unrelated hook that mentions the bin name in
-  // its matcher or args isn't silently deleted. Covers both the bare-bin
-  // and version-pinned npx forms, and older versions of this installer.
+  // De-dup: drop only the hooks[] items whose `command` field references
+  // the keeperhub-wallet-hook bin, leaving sibling commands within the
+  // same PreToolUse element untouched. Scoped to the `command` field (not
+  // the full serialised entry) so an unrelated hook that mentions the bin
+  // name in its matcher or args isn't silently deleted. Covers both the
+  // bare-bin and version-pinned npx forms, and older versions of this
+  // installer.
   const filtered: unknown[] = [];
   for (const entry of existingPreToolUse) {
-    if (!entryReferencesKeeperhubHook(entry)) {
-      filtered.push(entry);
+    const survivor = filterKeeperhubHooksFromEntry(entry);
+    if (survivor !== null) {
+      filtered.push(survivor);
     }
   }
   filtered.push(buildKeeperhubEntry(command));
