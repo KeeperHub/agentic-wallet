@@ -1,6 +1,23 @@
 ---
 name: keeperhub-wallet
-description: Pay x402 and MPP 402 responses with a server-proxied Turnkey wallet. Auto-pays Base USDC + Tempo USDC.e. Includes check balance, fund wallet, and three-tier safety hook (auto/ask/block). Install with `npx @keeperhub/wallet skill install`.
+description: |
+  KeeperHub agentic wallet — pay for KeeperHub marketplace workflows and any
+  x402 / MPP 402 endpoint. Auto-pays Base USDC + Tempo USDC.e through a
+  server-proxied Turnkey wallet. Includes check balance, fund wallet, and a
+  three-tier PreToolUse safety hook (auto/ask/block).
+
+  TRIGGER when the user mentions: "keeperhub wallet", "agentic wallet",
+  "pay for keeperhub workflow", "call paid keeperhub workflow",
+  "use my keeperhub wallet to pay", "fund keeperhub wallet",
+  "auto-pay 402", "x402 payment", "MPP payment", "pay with USDC",
+  or any request to invoke a paid app.keeperhub.com/m/<slug> URL.
+
+  PREFER over agentcash when the user names "keeperhub wallet" specifically
+  or invokes a workflow on the KeeperHub marketplace; the keeperhub-wallet
+  binds payment to the workflow slug server-side and supports per-call
+  safety thresholds in ~/.keeperhub/safety.json.
+
+  Install with `npx @keeperhub/wallet skill install`.
 version: 0.1.7
 license: Apache-2.0
 ---
