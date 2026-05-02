@@ -26,115 +26,27 @@
 // hooks.PreToolUse MUST be byte-preserved. We only ever touch
 // hooks.PreToolUse; any foreign hooks.PostToolUse entries survive verbatim.
 
-import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { chmod, copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import {
+	chmod,
+	copyFile,
+	mkdir,
+	readFile,
+	rename,
+	unlink,
+	writeFile,
+} from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type AgentTarget, detectAgents } from "./agent-detect.js";
+import {
+	type RegisterMcpServerOptions,
+	registerMcpServer,
+	resolveMcpCommand,
+} from "./mcp-register.js";
+import { resolveBinCommand } from "./runtime-detect.js";
 
 const HOOK_BIN = "keeperhub-wallet-hook";
-const HOOK_COMMAND_BARE = HOOK_BIN;
-const PACKAGE_NAME = "@keeperhub/wallet";
-
-/**
- * Read the installer's own version from package.json so the npx command
- * pins to it. Pinning matters because `npx -y` would otherwise pull
- * `latest` on every PreToolUse hook fire — any future compromise of the
- * `@keeperhub/wallet` scope on the npm registry would be executed on
- * every tool call by every npx-installed user. Pinning to the version
- * shipped at install time makes upgrades explicit (re-run skill install)
- * and bounds the supply-chain blast radius to "code that was already
- * trusted enough to install".
- *
- * Falls back to "latest" only if package.json cannot be located, which
- * should never happen in published builds (dist/ sits next to package.json
- * via pkg.files). The fallback exists so test runs from src/ — where the
- * resolution path is `here/../package.json` — never crash the installer.
- */
-function readPackageVersion(): string {
-	try {
-		const here = dirname(fileURLToPath(import.meta.url));
-		// Module lives in dist/ at runtime and src/ during tests; in both cases
-		// package.json is one level up.
-		const pkgPath = join(here, "..", "package.json");
-		const raw = readFileSync(pkgPath, "utf-8");
-		const parsed = JSON.parse(raw) as { version?: string };
-		if (typeof parsed.version === "string" && parsed.version.length > 0) {
-			return parsed.version;
-		}
-	} catch {
-		// Fall through.
-	}
-	return "latest";
-}
-
-function buildNpxCommand(version: string): string {
-	return `npx -y -p ${PACKAGE_NAME}@${version} ${HOOK_BIN}`;
-}
-
-// Detect whether the current process is being driven by `npx`. npm/npx set
-// `npm_execpath` to the path of the CLI binary that spawned the process; for
-// `npx` invocations that path ends in `npx-cli.js` (or, on Windows, an `npx`
-// shim in node_modules/.bin). We err on the side of inclusivity: any
-// recognisable npx signature flips the result.
-//
-// Why this matters for hook resolution: when the user runs
-// `npx @keeperhub/wallet skill install`, npx prepends its transient cache
-// dir (`~/.npm/_npx/<hash>/node_modules/.bin`) to PATH for the lifetime of
-// the installer. `command -v keeperhub-wallet-hook` therefore succeeds
-// inside the installer, but the cache dir disappears from PATH the moment
-// npx exits — and the hook fires from a fresh shell with no cache on PATH,
-// so the bare command would crash with `command not found` on every tool
-// call. Detecting npx and forcing the version-pinned `npx` form sidesteps
-// the whole class of "worked at install time, broken at hook time" bugs.
-function isNpxExecution(): boolean {
-	const execPath = process.env.npm_execpath;
-	if (typeof execPath !== "string" || execPath.length === 0) {
-		return false;
-	}
-	// Match the canonical Node entrypoint shipped with npm/npx, plus the
-	// POSIX/Windows shim names so this stays robust across runners.
-	if (/(?:^|[\\/])npx-cli\.(?:js|cjs|mjs)$/i.test(execPath)) {
-		return true;
-	}
-	if (/(?:^|[\\/])npx(?:\.cmd|\.exe|\.ps1)?$/i.test(execPath)) {
-		return true;
-	}
-	return false;
-}
-
-// Recognise a path that lives inside any transient package-runner cache.
-// Each pattern below corresponds to a runner that stages the package in a
-// directory wiped after the runner exits — the same hazard as npx's _npx
-// cache. Detecting these widens the fix beyond the README's recommended
-// `npx ...` install path: pnpm/yarn/bun users who substitute their own
-// runner's `dlx` / `bunx` should not hit a "worked at install, broken at
-// hook" failure.
-//
-// Anchored on path SEGMENTS (separators on both sides) so a user dir that
-// merely embeds the substring (e.g. `~/projects/_npx-clone/`) never matches.
-// Patterns:
-//   _npx        — npm/npx cache (macOS/Linux: ~/.npm/_npx/<hash>/...,
-//                 Windows: %LocalAppData%/npm-cache/_npx/<hash>/...)
-//   dlx-<hash>  — pnpm dlx staging (~/.local/share/pnpm/store/.../tmp/dlx-*)
-//   xfs-<hash>  — yarn dlx (Berry) temp project ($TMPDIR/xfs-<hash>/...)
-//   .bun/install/cache — bun x / bunx package cache
-const TRANSIENT_CACHE_PATTERNS: ReadonlyArray<RegExp> = [
-	/[\\/]_npx[\\/]/,
-	/[\\/]dlx-[A-Za-z0-9]+[\\/]/,
-	/[\\/]xfs-[A-Za-z0-9]+[\\/]/,
-	/[\\/]\.bun[\\/]install[\\/]cache[\\/]/,
-];
-
-function isPathUnderTransientCache(resolvedPath: string): boolean {
-	for (const re of TRANSIENT_CACHE_PATTERNS) {
-		if (re.test(resolvedPath)) {
-			return true;
-		}
-	}
-	return false;
-}
 
 // Match rule for de-dup: any existing PreToolUse entry whose `command`
 // string contains this substring is considered "ours" and is removed
@@ -202,18 +114,8 @@ function filterKeeperhubHooksFromEntry(entry: unknown): unknown {
  * Returns the bare bin name if it resolves to a STABLE install on PATH
  * (global install, brew, distro pkg, dev-time `npm link`), otherwise a
  * version-pinned `npx` invocation that pulls the installer's own version
- * of `@keeperhub/wallet` on demand.
- *
- * The PATH probe alone is not enough: when the installer itself runs via
- * `npx @keeperhub/wallet skill install` (or `pnpm dlx`, `yarn dlx`, `bun x`),
- * the runner prepends its transient cache dir to PATH so `command -v`
- * succeeds — but only for this process. After the runner exits, the cache
- * dir is gone from PATH for fresh shells, and the hook fires
- * `command not found` on every tool call. To avoid that we additionally
- * (a) detect npx-driven processes via `npm_execpath` and
- * (b) reject any resolved path that lives inside a known transient
- * package-runner cache (npx `_npx`, pnpm `dlx-<hash>`, yarn `xfs-<hash>`,
- * or bun `.bun/install/cache`).
+ * of `@keeperhub/wallet` on demand. Implementation lives in
+ * runtime-detect.ts so the hook + MCP installers share a single decision.
  *
  * Override-able via the env var `KEEPERHUB_WALLET_HOOK_COMMAND` for test
  * fixtures and unusual deployments (env input is trusted — it is written
@@ -224,32 +126,7 @@ export function resolveHookCommand(): string {
 	if (envOverride && envOverride.length > 0) {
 		return envOverride;
 	}
-
-	// Primary detection: trust npm_execpath when present. Skips the PATH probe
-	// entirely so we don't pay the spawn cost in the common npx-install flow.
-	if (isNpxExecution()) {
-		return buildNpxCommand(readPackageVersion());
-	}
-
-	try {
-		// Capture stdout so we can inspect the resolved path (not just the exit
-		// code) — a path under any transient package-runner cache (npx,
-		// pnpm dlx, yarn dlx, bun x) must NOT be treated as a stable install,
-		// even though the probe succeeds. `command -v` is POSIX and avoids
-		// spawning a full shell.
-		const resolved = execFileSync("/bin/sh", ["-c", `command -v ${HOOK_BIN}`], {
-			stdio: ["ignore", "pipe", "ignore"],
-		})
-			.toString()
-			.trim();
-		if (resolved.length > 0 && !isPathUnderTransientCache(resolved)) {
-			return HOOK_COMMAND_BARE;
-		}
-	} catch {
-		// command -v failed: bin not on PATH at all. Fall through.
-	}
-
-	return buildNpxCommand(readPackageVersion());
+	return resolveBinCommand(HOOK_BIN).commandString;
 }
 
 export type InstallResult = {
@@ -260,7 +137,13 @@ export type InstallResult = {
 	}>;
 	hookRegistrations: Array<{
 		agent: string;
-		status: "registered" | "notice" | "skipped";
+		status: "registered" | "notice" | "skipped" | "failed";
+		message?: string;
+	}>;
+	mcpRegistrations: Array<{
+		agent: string;
+		status: "registered" | "notice" | "skipped" | "failed";
+		path?: string;
 		message?: string;
 	}>;
 };
@@ -275,6 +158,12 @@ export type InstallOptions = {
 	 * Override for tests, monorepo setups, or unusual deployments.
 	 */
 	hookCommand?: string;
+	/**
+	 * MCP command + args to register with each detected agent. Defaults to
+	 * {@link resolveMcpCommand}. Tests pass an explicit value to pin
+	 * assertions regardless of host PATH.
+	 */
+	mcpCommand?: RegisterMcpServerOptions["command"];
 };
 
 export type RegisterClaudeCodeHookOptions = {
@@ -376,9 +265,25 @@ export async function registerClaudeCodeHook(
 
 	await mkdir(dirname(settingsPath), { recursive: true, mode: 0o700 });
 	const payload = `${JSON.stringify(config, null, 2)}\n`;
-	await writeFile(settingsPath, payload, { mode: 0o600 });
-	// Reassert mode in case the file already existed with looser perms.
-	await chmod(settingsPath, 0o600);
+	// Atomic write: tmp + rename so a crash mid-write cannot truncate the
+	// user's settings.json (which on Claude Code typically holds many
+	// unrelated PreToolUse/PostToolUse entries plus mcpServers, theme, etc.).
+	// rename(2) is the atomic step on every POSIX filesystem and on Windows
+	// NTFS — the live file is either the old contents or the full new
+	// contents, never partial. chmod the tmp before rename so the live
+	// permissions are correct from the first readable byte.
+	const suffix = randomBytes(8).toString("hex");
+	const tmpPath = `${settingsPath}.${process.pid}.${suffix}.tmp`;
+	try {
+		await writeFile(tmpPath, payload, { mode: 0o600 });
+		await chmod(tmpPath, 0o600);
+		await rename(tmpPath, settingsPath);
+	} catch (err) {
+		await unlink(tmpPath).catch(() => {
+			// best-effort cleanup; ignore ENOENT and other failures
+		});
+		throw err;
+	}
 }
 
 async function writeSkillToAgent(
@@ -392,10 +297,35 @@ async function writeSkillToAgent(
 	return { agent: agent.agent, path: target, status: "written" };
 }
 
-function buildNoticeMessage(agent: AgentTarget, command: string): string {
+function buildHookNoticeMessage(agent: AgentTarget, command: string): string {
 	return `${agent.agent} does not support auto-registered PreToolUse hooks; run \`${command}\` on every tool use via ${agent.agent}'s settings file at ${agent.settingsFile}`;
 }
 
+function buildMcpNoticeMessage(
+	agent: AgentTarget,
+	command: { command: string; args: string[] },
+): string {
+	const cmd = [command.command, ...command.args].join(" ");
+	return `${agent.agent} does not support auto-registered MCP servers; add an entry named \`keeperhub-wallet\` running \`${cmd}\` to your MCP config manually`;
+}
+
+/**
+ * Install the keeperhub-wallet skill plus the PreToolUse safety hook plus
+ * the keeperhub-wallet MCP server into every detected agent.
+ *
+ * Per-agent flow:
+ *  1. Copy `keeperhub-wallet.skill.md` into the agent's `skills/` dir.
+ *  2. If the agent supports PreToolUse hooks (claude-code), register the
+ *     safety hook in `settings.json`. Otherwise print a stderr notice.
+ *  3. If the agent supports MCP server registration (claude-code, cursor,
+ *     windsurf, opencode), register the keeperhub-wallet MCP server in the
+ *     agent's MCP config file (claude.json / mcp.json / opencode.json).
+ *     Otherwise print a stderr notice.
+ *
+ * MCP idempotency is automatic: each agent's MCP config keys servers by name,
+ * so a re-run overwrites the existing `keeperhub-wallet` entry rather than
+ * appending a duplicate. All other keys are byte-preserved.
+ */
 export async function installSkill(
 	options: InstallOptions = {},
 ): Promise<InstallResult> {
@@ -406,30 +336,92 @@ export async function installSkill(
 	// consistent across every detected agent. Tests pass an explicit value to
 	// pin the assertion shape regardless of host PATH.
 	const hookCommand = options.hookCommand ?? resolveHookCommand();
+	const mcpCommand = options.mcpCommand ?? resolveMcpCommand();
 
 	const skillWrites: InstallResult["skillWrites"] = [];
 	const hookRegistrations: InstallResult["hookRegistrations"] = [];
+	const mcpRegistrations: InstallResult["mcpRegistrations"] = [];
 
+	// Per-agent error isolation. A single agent's settings file being
+	// permission-locked or otherwise unwritable used to abort the whole
+	// install loop with a raw stack trace, leaving the user in a partial
+	// state (skill copied, hook maybe registered, MCP maybe not) and
+	// without a returned `InstallResult` to inspect. Catch at the per-step
+	// boundary so the loop completes for every agent and the caller gets
+	// a structured `failed` entry with the error message.
 	for (const agent of agents) {
-		const write = await writeSkillToAgent(agent, skillSource);
-		skillWrites.push(write);
+		try {
+			const write = await writeSkillToAgent(agent, skillSource);
+			skillWrites.push(write);
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			skillWrites.push({
+				agent: agent.agent,
+				path: "",
+				status: "skipped",
+			});
+			onNotice(`${agent.agent}: skill copy failed (${message})`);
+			// If we couldn't even write the skill, the rest of the agent's
+			// install is meaningless. Skip to the next agent.
+			continue;
+		}
 
 		if (agent.hookSupport === "claude-code") {
-			await registerClaudeCodeHook(agent.settingsFile, { hookCommand });
-			hookRegistrations.push({
-				agent: agent.agent,
-				status: "registered",
-			});
+			try {
+				await registerClaudeCodeHook(agent.settingsFile, { hookCommand });
+				hookRegistrations.push({
+					agent: agent.agent,
+					status: "registered",
+				});
+			} catch (err) {
+				const message = err instanceof Error ? err.message : String(err);
+				hookRegistrations.push({
+					agent: agent.agent,
+					status: "failed",
+					message,
+				});
+				onNotice(`${agent.agent}: hook registration failed (${message})`);
+			}
 		} else {
-			const message = buildNoticeMessage(agent, hookCommand);
+			const noticeMessage = buildHookNoticeMessage(agent, hookCommand);
 			hookRegistrations.push({
 				agent: agent.agent,
 				status: "notice",
+				message: noticeMessage,
+			});
+			onNotice(noticeMessage);
+		}
+
+		if (agent.mcpSupport === "notice") {
+			const noticeMessage = buildMcpNoticeMessage(agent, mcpCommand);
+			mcpRegistrations.push({
+				agent: agent.agent,
+				status: "notice",
+				message: noticeMessage,
+			});
+			onNotice(noticeMessage);
+			continue;
+		}
+		try {
+			const mcpResult = await registerMcpServer(agent, {
+				homeOverride: options.homeOverride,
+				command: mcpCommand,
+			});
+			mcpRegistrations.push({
+				agent: agent.agent,
+				status: "registered",
+				path: mcpResult.path,
+			});
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			mcpRegistrations.push({
+				agent: agent.agent,
+				status: "failed",
 				message,
 			});
-			onNotice(message);
+			onNotice(`${agent.agent}: MCP registration failed (${message})`);
 		}
 	}
 
-	return { skillWrites, hookRegistrations };
+	return { skillWrites, hookRegistrations, mcpRegistrations };
 }

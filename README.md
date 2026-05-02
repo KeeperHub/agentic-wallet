@@ -20,6 +20,22 @@ The `npx` form is **pinned to the installer's own version** — never `@latest`.
 
 Override with `KEEPERHUB_WALLET_HOOK_COMMAND` if you need a different command (monorepo bin path, wrapper script, etc.) — it is written verbatim into `settings.json`, so treat it as trusted input. Re-running `skill install` is idempotent across either form: switching between global, npx, or version-bumped npx replaces the existing entry rather than duplicating it. The de-dup matcher only inspects the `command` field of each hook, so unrelated entries that mention `keeperhub-wallet-hook` in their `matcher` or args are preserved.
 
+## MCP server
+
+`skill install` also registers a stdio MCP server (`keeperhub-wallet`) in each detected agent's MCP config so Claude — and any MCP-aware client — can call paid KeeperHub workflows from a tool call without writing a Node script.
+
+Three tools are exposed:
+
+- `call_workflow(slug, body?, paymentHint?, responseFormat?)` — pay-and-invoke a marketplace workflow by slug. Auto-pays x402 on Base USDC or MPP on Tempo USDC.e.
+- `balance()` — Base USDC + Tempo USDC.e on-chain balance.
+- `info()` — public wallet metadata (`subOrgId`, `walletAddress`). The HMAC secret is never returned.
+
+On the very first tool call, if `~/.keeperhub/wallet.json` is missing the server provisions a fresh wallet automatically — there is no manual `keeperhub-wallet add` step to run. The provisioned wallet starts with zero balance; the first 402 round-trip surfaces `INSUFFICIENT_FUNDS` with a Coinbase Onramp URL.
+
+The local `block_threshold_usd` from `~/.keeperhub/safety.json` is enforced inside the MCP server before paymentSigner signs. Calls above the cap return `{code:"POLICY_BLOCKED"}` without contacting Turnkey. Auto/ask thresholds are not enforced by the MCP server in v1 — everything below `block_threshold_usd` is auto-paid.
+
+Auto-registration covers Claude Code, Cursor, Windsurf, and OpenCode. Cline emits a copy-paste notice with the exact entry to paste into its config (the VS Code extension's globalStorage path is too variant-dependent to auto-detect reliably).
+
 ## First use
 
 ```ts

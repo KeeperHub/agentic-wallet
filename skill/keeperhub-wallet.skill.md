@@ -17,7 +17,14 @@ description: |
   binds payment to the workflow slug server-side and supports per-call
   safety thresholds in ~/.keeperhub/safety.json.
 
-  Install with `npx @keeperhub/wallet skill install`.
+  WHEN A KEEPERHUB-WALLET MCP SERVER IS LOADED, PREFER THE MCP TOOLS over
+  shelling out: `mcp__keeperhub-wallet__call_workflow` for paid invocation
+  by slug, `mcp__keeperhub-wallet__balance` and
+  `mcp__keeperhub-wallet__info` for status checks. The first tool call
+  auto-provisions a wallet if `~/.keeperhub/wallet.json` is missing — no
+  manual `add` ceremony required.
+
+  Install with `npx -p @keeperhub/wallet keeperhub-wallet skill install`.
 license: Apache-2.0
 ---
 
