@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.11](https://github.com/KeeperHub/agentic-wallet/compare/wallet-v0.1.10...wallet-v0.1.11) (2026-05-02)
+
+
+### Bug Fixes
+
+* **skill-install:** detect npx-cache execution + drop stale skill version ([494d033](https://github.com/KeeperHub/agentic-wallet/commit/494d033b7282a320b1356a750b6343ab8cbd4570))
+* **skill-install:** detect npx-cache execution to avoid stale hook command ([951e074](https://github.com/KeeperHub/agentic-wallet/commit/951e074a28fd45f431c8a9f7100547f65ff5b5ae))
+* **skill-install:** widen transient-cache detection beyond npx, gate POSIX-only tests ([98154d4](https://github.com/KeeperHub/agentic-wallet/commit/98154d4beed08f772f2e8141b3953fcf73bc42f6))
+
 ## [0.1.10](https://github.com/KeeperHub/agentic-wallet/compare/wallet-v0.1.9...wallet-v0.1.10) (2026-05-02)
 
 
