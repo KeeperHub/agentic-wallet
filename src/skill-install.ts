@@ -128,12 +128,12 @@ export type InstallResult = {
 	}>;
 	hookRegistrations: Array<{
 		agent: string;
-		status: "registered" | "notice" | "skipped";
+		status: "registered" | "notice" | "skipped" | "failed";
 		message?: string;
 	}>;
 	mcpRegistrations: Array<{
 		agent: string;
-		status: "registered" | "notice" | "skipped";
+		status: "registered" | "notice" | "skipped" | "failed";
 		path?: string;
 		message?: string;
 	}>;
@@ -317,45 +317,85 @@ export async function installSkill(
 	const hookRegistrations: InstallResult["hookRegistrations"] = [];
 	const mcpRegistrations: InstallResult["mcpRegistrations"] = [];
 
+	// Per-agent error isolation. A single agent's settings file being
+	// permission-locked or otherwise unwritable used to abort the whole
+	// install loop with a raw stack trace, leaving the user in a partial
+	// state (skill copied, hook maybe registered, MCP maybe not) and
+	// without a returned `InstallResult` to inspect. Catch at the per-step
+	// boundary so the loop completes for every agent and the caller gets
+	// a structured `failed` entry with the error message.
 	for (const agent of agents) {
-		const write = await writeSkillToAgent(agent, skillSource);
-		skillWrites.push(write);
+		try {
+			const write = await writeSkillToAgent(agent, skillSource);
+			skillWrites.push(write);
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			skillWrites.push({
+				agent: agent.agent,
+				path: "",
+				status: "skipped",
+			});
+			onNotice(`${agent.agent}: skill copy failed (${message})`);
+			// If we couldn't even write the skill, the rest of the agent's
+			// install is meaningless. Skip to the next agent.
+			continue;
+		}
 
 		if (agent.hookSupport === "claude-code") {
-			await registerClaudeCodeHook(agent.settingsFile, { hookCommand });
-			hookRegistrations.push({
-				agent: agent.agent,
-				status: "registered",
-			});
+			try {
+				await registerClaudeCodeHook(agent.settingsFile, { hookCommand });
+				hookRegistrations.push({
+					agent: agent.agent,
+					status: "registered",
+				});
+			} catch (err) {
+				const message = err instanceof Error ? err.message : String(err);
+				hookRegistrations.push({
+					agent: agent.agent,
+					status: "failed",
+					message,
+				});
+				onNotice(`${agent.agent}: hook registration failed (${message})`);
+			}
 		} else {
-			const message = buildHookNoticeMessage(agent, hookCommand);
+			const noticeMessage = buildHookNoticeMessage(agent, hookCommand);
 			hookRegistrations.push({
 				agent: agent.agent,
 				status: "notice",
-				message,
+				message: noticeMessage,
 			});
-			onNotice(message);
+			onNotice(noticeMessage);
 		}
 
 		if (agent.mcpSupport === "notice") {
-			const message = buildMcpNoticeMessage(agent, mcpCommand);
+			const noticeMessage = buildMcpNoticeMessage(agent, mcpCommand);
 			mcpRegistrations.push({
 				agent: agent.agent,
 				status: "notice",
-				message,
+				message: noticeMessage,
 			});
-			onNotice(message);
+			onNotice(noticeMessage);
 			continue;
 		}
-		const mcpResult = await registerMcpServer(agent, {
-			homeOverride: options.homeOverride,
-			command: mcpCommand,
-		});
-		mcpRegistrations.push({
-			agent: agent.agent,
-			status: "registered",
-			path: mcpResult.path,
-		});
+		try {
+			const mcpResult = await registerMcpServer(agent, {
+				homeOverride: options.homeOverride,
+				command: mcpCommand,
+			});
+			mcpRegistrations.push({
+				agent: agent.agent,
+				status: "registered",
+				path: mcpResult.path,
+			});
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			mcpRegistrations.push({
+				agent: agent.agent,
+				status: "failed",
+				message,
+			});
+			onNotice(`${agent.agent}: MCP registration failed (${message})`);
+		}
 	}
 
 	return { skillWrites, hookRegistrations, mcpRegistrations };

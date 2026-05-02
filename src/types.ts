@@ -1,32 +1,32 @@
 // Shared types across the package. Phase 34.
 export type WalletConfig = {
-  /** Turnkey sub-org ID returned by POST /api/agentic-wallet/provision */
-  subOrgId: string;
-  /** EVM-shared wallet address (same for Base chainId 8453 and Tempo chainId 4217) */
-  walletAddress: `0x${string}`;
-  /** 64-char lowercase hex HMAC secret, minted server-side at provision; never logged */
-  hmacSecret: string;
+	/** Turnkey sub-org ID returned by POST /api/agentic-wallet/provision */
+	subOrgId: string;
+	/** EVM-shared wallet address (same for Base chainId 8453 and Tempo chainId 4217) */
+	walletAddress: `0x${string}`;
+	/** 64-char lowercase hex HMAC secret, minted server-side at provision; never logged */
+	hmacSecret: string;
 };
 
 export type HmacHeaders = {
-  "X-KH-Sub-Org": string;
-  "X-KH-Timestamp": string;
-  "X-KH-Signature": string;
+	"X-KH-Sub-Org": string;
+	"X-KH-Timestamp": string;
+	"X-KH-Signature": string;
 };
 
 export type HookDecision = {
-  decision: "allow" | "deny" | "ask";
-  reason?: string;
+	decision: "allow" | "deny" | "ask";
+	reason?: string;
 };
 
 export class KeeperHubError extends Error {
-  readonly code: string;
+	readonly code: string;
 
-  constructor(code: string, message: string) {
-    super(message);
-    this.name = "KeeperHubError";
-    this.code = code;
-  }
+	constructor(code: string, message: string) {
+		super(message);
+		this.name = "KeeperHubError";
+		this.code = code;
+	}
 }
 
 /** Protocol preference for a single pay() or fetch() call. "auto" preserves
@@ -34,10 +34,31 @@ export class KeeperHubError extends Error {
 export type PaymentHint = "x402" | "mpp" | "auto";
 
 export class WalletConfigMissingError extends Error {
-  constructor() {
-    super(
-      "Wallet config not found at ~/.keeperhub/wallet.json. Run `npx @keeperhub/wallet add` to provision."
-    );
-    this.name = "WalletConfigMissingError";
-  }
+	constructor() {
+		super(
+			"Wallet config not found at ~/.keeperhub/wallet.json. Run `npx @keeperhub/wallet add` to provision.",
+		);
+		this.name = "WalletConfigMissingError";
+	}
+}
+
+/**
+ * Thrown when ~/.keeperhub/wallet.json exists but is unreadable as a wallet
+ * config (malformed JSON, truncated write, missing required fields, hand-edit
+ * gone wrong). Distinct from WalletConfigMissingError — the file's PRESENCE
+ * means the user (or a prior install) intentionally created it, so the MCP
+ * server MUST NOT silently auto-provision a replacement and abandon any funds
+ * held in the existing wallet. Surface a structured error with the path so
+ * the user can repair or delete the file deliberately.
+ */
+export class WalletConfigCorruptError extends Error {
+	readonly path: string;
+
+	constructor(path: string, reason: string) {
+		super(
+			`Wallet config at ${path} is unreadable: ${reason}. Repair the file by hand or delete it to re-provision a new wallet (this will abandon any funds held in the current wallet).`,
+		);
+		this.name = "WalletConfigCorruptError";
+		this.path = path;
+	}
 }

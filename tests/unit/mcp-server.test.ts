@@ -33,11 +33,17 @@ import type { FetchInit, PaymentSigner } from "../../src/payment-signer.js";
 import { DEFAULT_SAFETY_CONFIG } from "../../src/safety-config.js";
 import {
 	type WalletConfig,
+	WalletConfigCorruptError,
 	WalletConfigMissingError,
 } from "../../src/types.js";
 
-const { handleCallWorkflow, handleBalance, handleInfo, BODY_TEXT_CAP_BYTES } =
-	__test__;
+const {
+	handleCallWorkflow,
+	handleBalance,
+	handleInfo,
+	BODY_TEXT_CAP_BYTES,
+	resetProvisionInflightForTests,
+} = __test__;
 
 const WALLET: WalletConfig = {
 	subOrgId: "so_unit_mcp",
@@ -197,12 +203,16 @@ beforeEach(async () => {
 	// Silence stderr probes from logEvent during tests; assertions inspect
 	// tool result envelopes, not log lines.
 	vi.spyOn(process.stderr, "write").mockImplementation((): boolean => true);
+	// In-process provision-race cache is module-level state; clear between
+	// tests so a previous test's in-flight provision can never leak.
+	resetProvisionInflightForTests();
 });
 
 afterEach(async () => {
 	process.env.HOME = originalHome;
 	await rm(fakeHome, { recursive: true, force: true });
 	vi.restoreAllMocks();
+	resetProvisionInflightForTests();
 });
 
 describe("info tool", () => {
@@ -409,6 +419,113 @@ describe("auto-provision on first call", () => {
 		expect(secondParsed.provisioned).toBeUndefined();
 		expect(secondParsed.fundingUrl).toBeUndefined();
 		expect(provisionCount).toBe(1);
+	});
+
+	it("concurrent first calls coalesce onto a single provision (race fix)", async () => {
+		// Regression guard for the H1 race the correctness reviewer flagged:
+		// the SDK dispatches `info` + `balance` + `call_workflow` in parallel
+		// when an agent loads. Without the in-process promise cache, all
+		// three would enter the catch branch simultaneously, all three would
+		// POST /provision, and last-rename-wins on disk would leave two
+		// orphaned wallets — the loser's address shown to the user but its
+		// HMAC discarded. Assert the cache collapses N concurrent callers
+		// onto exactly one provisionWallet invocation.
+		let provisionCount = 0;
+		let walletPresent = false;
+		// Hold the provision promise open until all three callers have entered.
+		let releaseProvision: (() => void) | null = null;
+		const provisionGate = new Promise<void>((resolve) => {
+			releaseProvision = resolve;
+		});
+
+		const deps = buildDeps({
+			readWalletConfig: () => {
+				if (walletPresent) {
+					return Promise.resolve(WALLET);
+				}
+				return Promise.reject(new WalletConfigMissingError());
+			},
+			provisionWallet: async () => {
+				provisionCount += 1;
+				await provisionGate;
+				walletPresent = true;
+				return WALLET;
+			},
+		});
+
+		const a = handleInfo(deps);
+		const b = handleBalance(deps);
+		const c = handleInfo(deps);
+		// Let them all enter the catch+inflight slot before we release.
+		await Promise.resolve();
+		releaseProvision?.();
+		const [ra, rb, rc] = await Promise.all([a, b, c]);
+
+		expect(provisionCount).toBe(1);
+		// Every caller sees the same minted wallet.
+		const pa = parseToolJson(ra.content[0]?.text ?? "");
+		const pc = parseToolJson(rc.content[0]?.text ?? "");
+		expect(pa.walletAddress).toBe(WALLET.walletAddress);
+		expect(pc.walletAddress).toBe(WALLET.walletAddress);
+		// balance() doesn't surface walletAddress at the top level — assert
+		// it didn't error and that the call was satisfied by the same wallet.
+		expect(rb.isError).not.toBe(true);
+	});
+
+	it("corrupt wallet.json fails closed with WALLET_CONFIG_CORRUPT (does NOT silently re-provision)", async () => {
+		// H2 fix: the file's PRESENCE means the user (or a prior install)
+		// intentionally created a wallet there. Auto-minting a replacement
+		// would silently abandon any funds held in the existing wallet.
+		// Surface a structured error with the path so the user can repair
+		// or delete the file deliberately.
+		let provisionCount = 0;
+		const deps = buildDeps({
+			readWalletConfig: () =>
+				Promise.reject(
+					new WalletConfigCorruptError(
+						"/fake/.keeperhub/wallet.json",
+						"missing required fields",
+					),
+				),
+			provisionWallet: () => {
+				provisionCount += 1;
+				return Promise.resolve(WALLET);
+			},
+		});
+
+		const result = await handleInfo(deps);
+		expect(result.isError).toBe(true);
+		const parsed = parseToolJson(result.content[0]?.text ?? "");
+		expect(parsed.code).toBe("WALLET_CONFIG_CORRUPT");
+		expect(parsed.path).toBe("/fake/.keeperhub/wallet.json");
+		// The critical safety property: provisionWallet was NEVER called.
+		expect(provisionCount).toBe(0);
+	});
+});
+
+describe("call_workflow tool — SAFETY_CONFIG_INVALID", () => {
+	it("malformed safety.json returns structured error (not transport explosion)", async () => {
+		// H3 fix: loadSafetyConfig errors used to escape past the structured-
+		// error contract and surface as a JSON-RPC transport error which the
+		// calling agent could not programmatically recover from. Wrap and
+		// return SAFETY_CONFIG_INVALID so the model can read `code` and
+		// guide the user to repair ~/.keeperhub/safety.json.
+		const deps = buildDeps({
+			loadSafetyConfig: () =>
+				Promise.reject(new Error("Unexpected token } in JSON at position 42")),
+		});
+
+		const result = await handleCallWorkflow(
+			{ slug: "any-slug", body: {} },
+			deps,
+		);
+		expect(result.isError).toBe(true);
+		const parsed = parseToolJson(result.content[0]?.text ?? "");
+		expect(parsed.code).toBe("SAFETY_CONFIG_INVALID");
+		expect(typeof parsed.message).toBe("string");
+		// The reason from the underlying error is preserved (sanitised) so
+		// the user can act on it.
+		expect(parsed.message).toContain("Unexpected token");
 	});
 });
 

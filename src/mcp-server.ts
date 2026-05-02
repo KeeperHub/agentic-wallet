@@ -43,6 +43,7 @@ import { readWalletConfig } from "./storage.js";
 import {
 	KeeperHubError,
 	type WalletConfig,
+	WalletConfigCorruptError,
 	WalletConfigMissingError,
 } from "./types.js";
 import { parseX402Challenge, type X402Challenge } from "./x402-detect.js";
@@ -194,11 +195,24 @@ type EnsureWalletResult = {
 };
 
 /**
- * Read ~/.keeperhub/wallet.json; if missing, mint a new wallet via the same
- * provision endpoint as `keeperhub-wallet add`. Returns the wallet config
- * plus a `provisioned` flag so callers can surface "I created a wallet at
- * 0xABC; here's how to fund it" guidance to the user on the first call.
+ * In-process gate against the concurrent-provision race. Without this, two
+ * tool calls hitting an empty `~/.keeperhub/wallet.json` simultaneously
+ * (`info` + `balance` from a single Claude session is enough — the SDK
+ * dispatches them in parallel) both see WalletConfigMissingError, both POST
+ * `/api/agentic-wallet/provision`, the server mints two distinct
+ * (subOrgId, hmacSecret) triples, and last-rename-wins on
+ * writeWalletConfig leaves disk holding wallet B while the loser's
+ * envelope already showed wallet A's address to the user. Subsequent
+ * calls then sign with B's HMAC against A's subOrgId and 401 forever,
+ * with funds potentially trapped in the orphaned wallet A.
+ *
+ * The cache is scoped to a single in-flight provision attempt; on settle
+ * (success or failure) it clears, so callers after the first successful
+ * provision read the on-disk config via the normal `readWalletConfig`
+ * path and never enter the provision branch again.
  */
+let provisionInflight: Promise<WalletConfig> | null = null;
+
 async function ensureWallet(deps: McpServerDeps): Promise<EnsureWalletResult> {
 	try {
 		const wallet = await deps.readWalletConfig();
@@ -209,13 +223,37 @@ async function ensureWallet(deps: McpServerDeps): Promise<EnsureWalletResult> {
 			hmacSecret: wallet.hmacSecret,
 		};
 	} catch (err) {
+		// Fail-closed for corrupt configs: the file's PRESENCE means the user
+		// (or a prior install) intentionally created a wallet there. Auto-
+		// minting a replacement would silently abandon any funds held by the
+		// existing wallet. Surface a structured error with the path so the
+		// user can repair or delete the file deliberately.
+		if (err instanceof WalletConfigCorruptError) {
+			throw err;
+		}
 		if (!(err instanceof WalletConfigMissingError)) {
 			throw err;
 		}
-		const wallet = await deps.provisionWallet();
-		logEvent("mcp.wallet.provisioned", {
-			walletAddress: wallet.walletAddress,
-		});
+		// Coalesce concurrent provision attempts onto a single in-flight
+		// promise. The first caller to enter the catch sets the slot;
+		// subsequent callers await the same promise rather than firing a
+		// second provision request. On settle the slot clears so any later
+		// invocation (e.g. user manually deleted wallet.json again) goes
+		// through a fresh provision.
+		if (provisionInflight === null) {
+			provisionInflight = (async (): Promise<WalletConfig> => {
+				try {
+					const minted = await deps.provisionWallet();
+					logEvent("mcp.wallet.provisioned", {
+						walletAddress: minted.walletAddress,
+					});
+					return minted;
+				} finally {
+					provisionInflight = null;
+				}
+			})();
+		}
+		const wallet = await provisionInflight;
 		return {
 			provisioned: true,
 			walletAddress: wallet.walletAddress,
@@ -223,6 +261,11 @@ async function ensureWallet(deps: McpServerDeps): Promise<EnsureWalletResult> {
 			hmacSecret: wallet.hmacSecret,
 		};
 	}
+}
+
+/** Test-only: clear the in-process provision cache between test cases. */
+function resetProvisionInflightForTests(): void {
+	provisionInflight = null;
 }
 
 // ---- Payment-amount parsing for safety check -----------------------------
@@ -234,25 +277,37 @@ function microUsdcToUsd(microUsdc: bigint): number {
 }
 
 /**
- * Extract the per-call payment amount in micro-USDC from a 402 challenge.
- * Returns null when no challenge is present (caller will fall through and
- * let paymentSigner handle the no-protocol case).
+ * Extract the lowest per-call payment amount in micro-USDC from a 402
+ * challenge. Returns null when no challenge is present (caller will fall
+ * through and let paymentSigner handle the no-protocol case).
  *
- * For x402: amount comes from accepts[0].amount (string of integer micro-USDC).
+ * For x402: scan ALL `accepts[]` entries and pick the cheapest parseable
+ * amount. Spec doesn't guarantee `accepts[0]` is the cheapest — it's just
+ * the first offered. paymentSigner will pick whatever it picks for its
+ * own protocol-preference reasons; if even the minimum exceeds our cap
+ * we know we'd over-pay regardless. Conversely, blocking on `[0]` when
+ * `[1]` is cheaper would over-block calls the user actually wants to make.
+ *
  * For MPP: the serialised mppx credential includes amount fields, but the
  * client never decodes it — we let the server enforce the cap there. We
  * therefore only block on x402 amount; MPP amounts pass through to the
  * server's policy hard cap, which is the authoritative gate (GUARD-06).
  */
 function extractX402AmountMicro(x402: X402Challenge | null): bigint | null {
-	const first = x402?.accepts[0];
-	if (!first) {
+	if (!x402) {
 		return null;
 	}
-	if (!/^\d+$/.test(first.amount)) {
-		return null;
+	let min: bigint | null = null;
+	for (const accept of x402.accepts) {
+		if (!/^\d+$/.test(accept.amount)) {
+			continue;
+		}
+		const candidate = BigInt(accept.amount);
+		if (min === null || candidate < min) {
+			min = candidate;
+		}
 	}
-	return BigInt(first.amount);
+	return min;
 }
 
 // Convert "1.234567" decimal-USDC string from balance.checkBalance into
@@ -320,12 +375,78 @@ type CallWorkflowArgs = {
 	responseFormat?: "text" | "base64" | "json";
 };
 
+/**
+ * Load the user's safety thresholds, returning null if the config file is
+ * present-but-broken. Fail-CLOSED on a load error: the caller surfaces a
+ * structured `SAFETY_CONFIG_INVALID` envelope so the user can repair the
+ * file. Without this, a malformed safety.json throws past the structured-
+ * error contract and the model sees a JSON-RPC transport explosion with
+ * no path to recover. Missing-file is the safe default elsewhere — only
+ * malformed bytes hit this path.
+ */
+async function loadSafetyOrError(
+	deps: McpServerDeps,
+): Promise<{ safety: SafetyConfig } | { error: ToolResult }> {
+	try {
+		return { safety: await deps.loadSafetyConfig() };
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		return {
+			error: structuredError({
+				code: "SAFETY_CONFIG_INVALID",
+				message: sanitise(
+					`~/.keeperhub/safety.json is unreadable: ${message}. Repair the file by hand or delete it to fall back to defaults.`,
+				),
+			}),
+		};
+	}
+}
+
+/**
+ * Map exceptions raised inside any tool handler into the structured-error
+ * envelope contract. Throwing past this would surface as a JSON-RPC
+ * transport error which the calling agent cannot programmatically recover
+ * from. Specifically: corrupt wallet config, KeeperHubError-coded
+ * failures, and provision/HTTP errors should all become `isError:true`
+ * envelopes so Claude can read `code` and act.
+ */
+function toolErrorEnvelope(err: unknown): ToolResult {
+	if (err instanceof WalletConfigCorruptError) {
+		return structuredError({
+			code: "WALLET_CONFIG_CORRUPT",
+			message: sanitise(err.message),
+			path: err.path,
+		});
+	}
+	if (err instanceof KeeperHubError) {
+		return structuredError({
+			code: err.code,
+			message: sanitise(err.message),
+		});
+	}
+	const message = err instanceof Error ? err.message : String(err);
+	return structuredError({
+		code: "INTERNAL_ERROR",
+		message: sanitise(message),
+	});
+}
+
 async function handleCallWorkflow(
 	args: CallWorkflowArgs,
 	deps: McpServerDeps,
 ): Promise<ToolResult> {
-	const safety: SafetyConfig = await deps.loadSafetyConfig();
-	const ensured = await ensureWallet(deps);
+	const safetyResult = await loadSafetyOrError(deps);
+	if ("error" in safetyResult) {
+		return safetyResult.error;
+	}
+	const { safety } = safetyResult;
+
+	let ensured: EnsureWalletResult;
+	try {
+		ensured = await ensureWallet(deps);
+	} catch (err) {
+		return toolErrorEnvelope(err);
+	}
 	const baseUrl = resolveKeeperhubBaseUrl();
 	const url = `${baseUrl}/api/mcp/workflows/${encodeURIComponent(args.slug)}/call`;
 	const bodyJson = JSON.stringify(args.body ?? {});
@@ -495,7 +616,12 @@ async function handleCallWorkflow(
 }
 
 async function handleBalance(deps: McpServerDeps): Promise<ToolResult> {
-	const ensured = await ensureWallet(deps);
+	let ensured: EnsureWalletResult;
+	try {
+		ensured = await ensureWallet(deps);
+	} catch (err) {
+		return toolErrorEnvelope(err);
+	}
 	const snap = await deps.checkBalance({
 		subOrgId: ensured.subOrgId,
 		walletAddress: ensured.walletAddress,
@@ -517,7 +643,12 @@ async function handleInfo(deps: McpServerDeps): Promise<ToolResult> {
 	// CRITICAL: never include hmacSecret. Same rule as src/cli.ts cmdAdd at
 	// lines 113-115 (T-34-cli-02 mitigation). The CLI prints only public
 	// fields; the MCP server mirrors that exactly.
-	const ensured = await ensureWallet(deps);
+	let ensured: EnsureWalletResult;
+	try {
+		ensured = await ensureWallet(deps);
+	} catch (err) {
+		return toolErrorEnvelope(err);
+	}
 	return structuredOk({
 		subOrgId: ensured.subOrgId,
 		walletAddress: ensured.walletAddress,
@@ -597,5 +728,6 @@ export const __test__ = {
 	handleBalance,
 	handleInfo,
 	defaultDeps,
+	resetProvisionInflightForTests,
 	BODY_TEXT_CAP_BYTES,
 };
