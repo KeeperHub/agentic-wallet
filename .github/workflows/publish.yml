@@ -57,8 +57,8 @@ jobs:
           # 76be751 to fire on wallet-v* tags but the strip below was
           # never updated, so v0.1.9 published cleanly while
           # wallet-v0.1.9 failed with a confusing tag-version mismatch.
-          # Env-only input ($REF_NAME from github.ref_name); no direct
-          # ${{ }} expansion in the script body.
+          # Env-only input -- REF_NAME is set in env: from github.ref_name;
+          # no direct expression-form expansion in the script body.
           TAG_VERSION="${REF_NAME##*-v}"
           TAG_VERSION="${TAG_VERSION#v}"
           PKG_VERSION="$(node -p "require('./package.json').version")"
