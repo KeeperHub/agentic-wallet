@@ -52,7 +52,15 @@ jobs:
         env:
           REF_NAME: ${{ github.ref_name }}
         run: |
-          TAG_VERSION="${REF_NAME#v}"
+          # Accept both legacy 'v<semver>' and release-please component
+          # 'wallet-v<semver>' tag formats. The trigger was widened in
+          # 76be751 to fire on wallet-v* tags but the strip below was
+          # never updated, so v0.1.9 published cleanly while
+          # wallet-v0.1.9 failed with a confusing tag-version mismatch.
+          # Env-only input ($REF_NAME from github.ref_name); no direct
+          # ${{ }} expansion in the script body.
+          TAG_VERSION="${REF_NAME##*-v}"
+          TAG_VERSION="${TAG_VERSION#v}"
           PKG_VERSION="$(node -p "require('./package.json').version")"
           if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
             echo "Tag version ($TAG_VERSION) does not match package.json version ($PKG_VERSION)" >&2
