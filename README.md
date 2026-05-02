@@ -5,18 +5,18 @@ Agentic wallet for AI agents. Auto-pays x402 (Base USDC) and MPP (Tempo USDC.e) 
 ## Install
 
 ```bash
-npx @keeperhub/wallet skill install
-npx @keeperhub/wallet add
+npx -p @keeperhub/wallet keeperhub-wallet skill install
+npx -p @keeperhub/wallet keeperhub-wallet add
 ```
 
-`skill install` writes the skill file into every detected agent directory AND registers the `keeperhub-wallet-hook` PreToolUse safety hook in `~/.claude/settings.json`. The alternate `npx skills add keeperhub/agentic-wallet-skills` path installs the skill file only — if you use it, follow up with `npx @keeperhub/wallet skill install` to activate the safety hook.
+`skill install` writes the skill file into every detected agent directory AND registers the `keeperhub-wallet-hook` PreToolUse safety hook in `~/.claude/settings.json`. The alternate `npx skills add keeperhub/agentic-wallet-skills` path installs the skill file only — if you use it, follow up with `npx -p @keeperhub/wallet keeperhub-wallet skill install` to activate the safety hook.
 
 The installer probes `PATH` and chooses the form that will resolve later when your shell fires the hook:
 
 - If `keeperhub-wallet-hook` is on `PATH` (global install or `npm link`), the installer writes the bare command for lowest startup latency.
-- Otherwise (the typical `npx @keeperhub/wallet skill install` flow, where the bin is only inside an `npx` cache), it writes `npx -y -p @keeperhub/wallet@<version> keeperhub-wallet-hook` so the hook resolves on every fire without a global install.
+- Otherwise (the typical `npx -p @keeperhub/wallet keeperhub-wallet skill install` flow, where the bin is only inside an `npx` cache), it writes `npx -y -p @keeperhub/wallet@<version> keeperhub-wallet-hook` so the hook resolves on every fire without a global install.
 
-The `npx` form is **pinned to the installer's own version** — never `@latest`. Pinning bounds supply-chain risk: `npx -y` runs whatever is in the registry, so a `latest`-pulling hook would execute new code on every tool call after any future scope compromise. To upgrade, re-run `skill install` from a fresh `npx @keeperhub/wallet@<new-version>`.
+The `npx` form is **pinned to the installer's own version** — never `@latest`. Pinning bounds supply-chain risk: `npx -y` runs whatever is in the registry, so a `latest`-pulling hook would execute new code on every tool call after any future scope compromise. To upgrade, re-run `skill install` from a fresh `npx -p @keeperhub/wallet@<new-version> keeperhub-wallet skill install`.
 
 Override with `KEEPERHUB_WALLET_HOOK_COMMAND` if you need a different command (monorepo bin path, wrapper script, etc.) — it is written verbatim into `settings.json`, so treat it as trusted input. Re-running `skill install` is idempotent across either form: switching between global, npx, or version-bumped npx replaces the existing entry rather than duplicating it. The de-dup matcher only inspects the `command` field of each hook, so unrelated entries that mention `keeperhub-wallet-hook` in their `matcher` or args are preserved.
 
