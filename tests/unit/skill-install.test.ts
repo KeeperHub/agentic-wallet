@@ -23,8 +23,15 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, delimiter as pathDelimiter } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+// PATH-probing tests assume POSIX `/bin/sh` and `command -v`. Windows
+// shells use a different separator AND a different shell entirely, so we
+// gate this slice of the suite. The resolver's broader Windows behavior
+// is a known follow-up (calls `/bin/sh` unconditionally today).
+const itPosix = process.platform === "win32" ? it.skip : it;
+
 import {
 	installSkill,
 	registerClaudeCodeHook,
@@ -392,77 +399,167 @@ describe("resolveHookCommand()", () => {
 		expect(resolveHookCommand()).toContain("keeperhub-wallet-hook");
 	});
 
-	it("returns npx form when npm_execpath points at npx-cli, even if bin is on PATH", async () => {
-		// Repro: when the user runs `npx @keeperhub/wallet skill install`, npx
-		// prepends its transient cache dir to PATH for the lifetime of the
-		// installer process. `command -v keeperhub-wallet-hook` therefore
-		// resolves successfully INSIDE the installer, but the cache dir is
-		// gone from PATH for fresh shells (the ones that fire the hook), so
-		// the hook crashes with `command not found`. Detect npx via
-		// `npm_execpath` (the canonical signal npm/npx set on every spawn)
-		// and force the npx form regardless of probe outcome.
-		delete process.env.KEEPERHUB_WALLET_HOOK_COMMAND;
-		const stubRoot = await mkdtemp(join(tmpdir(), "kh-resolver-npx-env-"));
-		const stubBinDir = await seedHookStub(
-			join(stubRoot, "stable-install", "bin"),
-		);
-		process.env.PATH = `${stubBinDir}:/var/empty`;
-		process.env.npm_execpath =
-			"/Users/x/.npm/_npx/abc/node_modules/npm/bin/npx-cli.js";
+	itPosix(
+		"returns npx form when npm_execpath points at npx-cli, even if bin is on PATH",
+		async () => {
+			// Repro: when the user runs `npx @keeperhub/wallet skill install`, npx
+			// prepends its transient cache dir to PATH for the lifetime of the
+			// installer process. `command -v keeperhub-wallet-hook` therefore
+			// resolves successfully INSIDE the installer, but the cache dir is
+			// gone from PATH for fresh shells (the ones that fire the hook), so
+			// the hook crashes with `command not found`. Detect npx via
+			// `npm_execpath` (the canonical signal npm/npx set on every spawn)
+			// and force the npx form regardless of probe outcome.
+			delete process.env.KEEPERHUB_WALLET_HOOK_COMMAND;
+			const stubRoot = await mkdtemp(join(tmpdir(), "kh-resolver-npx-env-"));
+			const stubBinDir = await seedHookStub(
+				join(stubRoot, "stable-install", "bin"),
+			);
+			process.env.PATH = `${stubBinDir}${pathDelimiter}/var/empty`;
+			process.env.npm_execpath =
+				"/Users/x/.npm/_npx/abc/node_modules/npm/bin/npx-cli.js";
 
-		try {
-			const cmd = resolveHookCommand();
-			expect(cmd.startsWith("npx -y -p @keeperhub/wallet@")).toBe(true);
-		} finally {
-			await rm(stubRoot, { recursive: true, force: true });
-		}
-	});
+			try {
+				const cmd = resolveHookCommand();
+				expect(cmd.startsWith("npx -y -p @keeperhub/wallet@")).toBe(true);
+			} finally {
+				await rm(stubRoot, { recursive: true, force: true });
+			}
+		},
+	);
 
-	it("returns npx form when the resolved bin path lives under an npx _npx cache", async () => {
-		// Fallback detection for runners that don't propagate npm_execpath:
-		// resolve the bin via `command -v` and check whether the absolute path
-		// contains an `_npx/` segment (npm's transient install cache, both on
-		// POSIX and Windows). A path under _npx is by definition not durable
-		// and the bare command form would fail post-install.
-		delete process.env.KEEPERHUB_WALLET_HOOK_COMMAND;
-		delete process.env.npm_execpath;
-		const npxRoot = await mkdtemp(join(tmpdir(), "kh-resolver-npx-path-"));
-		const npxBinDir = await seedHookStub(
-			join(npxRoot, "_npx", "abc123", "node_modules", ".bin"),
-		);
-		process.env.PATH = `${npxBinDir}:/var/empty`;
+	itPosix(
+		"returns npx form when the resolved bin path lives under an npx _npx cache",
+		async () => {
+			// Fallback detection for runners that don't propagate npm_execpath:
+			// resolve the bin via `command -v` and check whether the absolute path
+			// contains an `_npx/` segment (npm's transient install cache, both on
+			// POSIX and Windows). A path under _npx is by definition not durable
+			// and the bare command form would fail post-install.
+			delete process.env.KEEPERHUB_WALLET_HOOK_COMMAND;
+			delete process.env.npm_execpath;
+			const npxRoot = await mkdtemp(join(tmpdir(), "kh-resolver-npx-path-"));
+			const npxBinDir = await seedHookStub(
+				join(npxRoot, "_npx", "abc123", "node_modules", ".bin"),
+			);
+			process.env.PATH = `${npxBinDir}${pathDelimiter}/var/empty`;
 
-		try {
-			const cmd = resolveHookCommand();
-			expect(cmd.startsWith("npx -y -p @keeperhub/wallet@")).toBe(true);
-		} finally {
-			await rm(npxRoot, { recursive: true, force: true });
-		}
-	});
+			try {
+				const cmd = resolveHookCommand();
+				expect(cmd.startsWith("npx -y -p @keeperhub/wallet@")).toBe(true);
+			} finally {
+				await rm(npxRoot, { recursive: true, force: true });
+			}
+		},
+	);
 
-	it("returns the bare bin form when the resolved path is a stable install location", async () => {
-		// Positive case: a real global install (npm i -g, brew, distro pkg) lands
-		// outside any _npx cache and stays on PATH after the installer exits, so
-		// the bare-bin form is the lowest-latency hook command.
-		delete process.env.KEEPERHUB_WALLET_HOOK_COMMAND;
-		delete process.env.npm_execpath;
-		const stableRoot = await mkdtemp(join(tmpdir(), "kh-resolver-stable-"));
-		const stableBinDir = await seedHookStub(
-			join(stableRoot, "usr", "local", "bin"),
-		);
-		process.env.PATH = `${stableBinDir}:/var/empty`;
+	itPosix(
+		"returns npx form when the resolved bin path lives under a pnpm dlx cache",
+		async () => {
+			// pnpm dlx stages bins under
+			// ~/.local/share/pnpm/store/v3/tmp/dlx-<hash>/node_modules/.bin/...
+			// which is wiped after the dlx process exits. Same hazard class as
+			// npx's _npx cache — without this branch, a user who substitutes
+			// `pnpm dlx` for `npx` in the README install path would re-introduce
+			// the original "command not found" bug.
+			delete process.env.KEEPERHUB_WALLET_HOOK_COMMAND;
+			delete process.env.npm_execpath;
+			const dlxRoot = await mkdtemp(join(tmpdir(), "kh-resolver-pnpm-dlx-"));
+			const dlxBinDir = await seedHookStub(
+				join(dlxRoot, "tmp", "dlx-abc123", "node_modules", ".bin"),
+			);
+			process.env.PATH = `${dlxBinDir}${pathDelimiter}/var/empty`;
 
-		try {
-			expect(resolveHookCommand()).toBe("keeperhub-wallet-hook");
-		} finally {
-			await rm(stableRoot, { recursive: true, force: true });
-		}
-	});
+			try {
+				const cmd = resolveHookCommand();
+				expect(cmd.startsWith("npx -y -p @keeperhub/wallet@")).toBe(true);
+			} finally {
+				await rm(dlxRoot, { recursive: true, force: true });
+			}
+		},
+	);
+
+	itPosix(
+		"returns npx form when the resolved bin path lives under a yarn dlx (xfs-) cache",
+		async () => {
+			// yarn dlx (Berry) creates a temporary project under $TMPDIR/xfs-<hash>/
+			// and stages bins inside its node_modules tree. Wiped on exit.
+			delete process.env.KEEPERHUB_WALLET_HOOK_COMMAND;
+			delete process.env.npm_execpath;
+			const xfsRoot = await mkdtemp(join(tmpdir(), "kh-resolver-yarn-dlx-"));
+			const xfsBinDir = await seedHookStub(
+				join(xfsRoot, "xfs-deadbeef", "node_modules", ".bin"),
+			);
+			process.env.PATH = `${xfsBinDir}${pathDelimiter}/var/empty`;
+
+			try {
+				const cmd = resolveHookCommand();
+				expect(cmd.startsWith("npx -y -p @keeperhub/wallet@")).toBe(true);
+			} finally {
+				await rm(xfsRoot, { recursive: true, force: true });
+			}
+		},
+	);
+
+	itPosix(
+		"returns npx form when the resolved bin path lives under bun's install cache",
+		async () => {
+			// bun x / bunx caches packages under ~/.bun/install/cache/<scope>/
+			// <pkg>@<ver>/... — durability depends on Bun's GC, not safe to
+			// reference as a stable hook target.
+			delete process.env.KEEPERHUB_WALLET_HOOK_COMMAND;
+			delete process.env.npm_execpath;
+			const bunRoot = await mkdtemp(join(tmpdir(), "kh-resolver-bun-x-"));
+			const bunBinDir = await seedHookStub(
+				join(
+					bunRoot,
+					".bun",
+					"install",
+					"cache",
+					"@keeperhub",
+					"wallet@0.1.10",
+					"bin",
+				),
+			);
+			process.env.PATH = `${bunBinDir}${pathDelimiter}/var/empty`;
+
+			try {
+				const cmd = resolveHookCommand();
+				expect(cmd.startsWith("npx -y -p @keeperhub/wallet@")).toBe(true);
+			} finally {
+				await rm(bunRoot, { recursive: true, force: true });
+			}
+		},
+	);
+
+	itPosix(
+		"returns the bare bin form when the resolved path is a stable install location",
+		async () => {
+			// Positive case: a real global install (npm i -g, brew, distro pkg) lands
+			// outside any transient cache and stays on PATH after the installer
+			// exits, so the bare-bin form is the lowest-latency hook command.
+			delete process.env.KEEPERHUB_WALLET_HOOK_COMMAND;
+			delete process.env.npm_execpath;
+			const stableRoot = await mkdtemp(join(tmpdir(), "kh-resolver-stable-"));
+			const stableBinDir = await seedHookStub(
+				join(stableRoot, "usr", "local", "bin"),
+			);
+			process.env.PATH = `${stableBinDir}${pathDelimiter}/var/empty`;
+
+			try {
+				expect(resolveHookCommand()).toBe("keeperhub-wallet-hook");
+			} finally {
+				await rm(stableRoot, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it("pins npx to the installer's package version (no implicit @latest)", () => {
 		// Reviewer 2 finding: pulling `latest` on every PreToolUse fire is a
 		// supply-chain risk. Force the npx fallback by pointing the env-driven
 		// PATH at an empty directory so `command -v` cannot resolve the bin.
+		// Safe on Windows too — the empty PATH still lands in the catch branch
+		// (execFileSync('/bin/sh', ...) ENOENT) and returns the npx form.
 		delete process.env.KEEPERHUB_WALLET_HOOK_COMMAND;
 		const originalPath = process.env.PATH;
 		process.env.PATH = "/var/empty";

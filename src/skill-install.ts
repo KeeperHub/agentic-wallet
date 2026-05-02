@@ -104,14 +104,36 @@ function isNpxExecution(): boolean {
 	return false;
 }
 
-// Recognise a path that lives inside npm's transient `npx` install cache.
-// The literal `_npx` segment is the cross-platform marker:
-//   - macOS/Linux: ~/.npm/_npx/<hash>/node_modules/.bin/<bin>
-//   - Windows:     %LocalAppData%/npm-cache/_npx/<hash>/node_modules/.bin/<bin>
-// Anchoring on the segment (not the prefix) keeps detection working when
-// users override the npm cache dir via `npm config set cache <path>`.
-function isPathUnderNpxCache(resolvedPath: string): boolean {
-	return /[\\/]_npx[\\/]/.test(resolvedPath);
+// Recognise a path that lives inside any transient package-runner cache.
+// Each pattern below corresponds to a runner that stages the package in a
+// directory wiped after the runner exits — the same hazard as npx's _npx
+// cache. Detecting these widens the fix beyond the README's recommended
+// `npx ...` install path: pnpm/yarn/bun users who substitute their own
+// runner's `dlx` / `bunx` should not hit a "worked at install, broken at
+// hook" failure.
+//
+// Anchored on path SEGMENTS (separators on both sides) so a user dir that
+// merely embeds the substring (e.g. `~/projects/_npx-clone/`) never matches.
+// Patterns:
+//   _npx        — npm/npx cache (macOS/Linux: ~/.npm/_npx/<hash>/...,
+//                 Windows: %LocalAppData%/npm-cache/_npx/<hash>/...)
+//   dlx-<hash>  — pnpm dlx staging (~/.local/share/pnpm/store/.../tmp/dlx-*)
+//   xfs-<hash>  — yarn dlx (Berry) temp project ($TMPDIR/xfs-<hash>/...)
+//   .bun/install/cache — bun x / bunx package cache
+const TRANSIENT_CACHE_PATTERNS: ReadonlyArray<RegExp> = [
+	/[\\/]_npx[\\/]/,
+	/[\\/]dlx-[A-Za-z0-9]+[\\/]/,
+	/[\\/]xfs-[A-Za-z0-9]+[\\/]/,
+	/[\\/]\.bun[\\/]install[\\/]cache[\\/]/,
+];
+
+function isPathUnderTransientCache(resolvedPath: string): boolean {
+	for (const re of TRANSIENT_CACHE_PATTERNS) {
+		if (re.test(resolvedPath)) {
+			return true;
+		}
+	}
+	return false;
 }
 
 // Match rule for de-dup: any existing PreToolUse entry whose `command`
@@ -183,12 +205,15 @@ function filterKeeperhubHooksFromEntry(entry: unknown): unknown {
  * of `@keeperhub/wallet` on demand.
  *
  * The PATH probe alone is not enough: when the installer itself runs via
- * `npx @keeperhub/wallet skill install`, npx prepends its transient cache
- * dir to PATH so `command -v` succeeds — but only for this process. After
- * npx exits, the cache dir is gone from PATH for fresh shells, and the
- * hook fires `command not found` on every tool call. To avoid that we
- * additionally (a) detect npx-driven processes via `npm_execpath` and
- * (b) reject any resolved path that lives inside an `_npx/` cache.
+ * `npx @keeperhub/wallet skill install` (or `pnpm dlx`, `yarn dlx`, `bun x`),
+ * the runner prepends its transient cache dir to PATH so `command -v`
+ * succeeds — but only for this process. After the runner exits, the cache
+ * dir is gone from PATH for fresh shells, and the hook fires
+ * `command not found` on every tool call. To avoid that we additionally
+ * (a) detect npx-driven processes via `npm_execpath` and
+ * (b) reject any resolved path that lives inside a known transient
+ * package-runner cache (npx `_npx`, pnpm `dlx-<hash>`, yarn `xfs-<hash>`,
+ * or bun `.bun/install/cache`).
  *
  * Override-able via the env var `KEEPERHUB_WALLET_HOOK_COMMAND` for test
  * fixtures and unusual deployments (env input is trusted — it is written
@@ -208,15 +233,16 @@ export function resolveHookCommand(): string {
 
 	try {
 		// Capture stdout so we can inspect the resolved path (not just the exit
-		// code) — a path under an `_npx/` cache must NOT be treated as a stable
-		// install, even though the probe succeeds. `command -v` is POSIX and
-		// avoids spawning a full shell.
+		// code) — a path under any transient package-runner cache (npx,
+		// pnpm dlx, yarn dlx, bun x) must NOT be treated as a stable install,
+		// even though the probe succeeds. `command -v` is POSIX and avoids
+		// spawning a full shell.
 		const resolved = execFileSync("/bin/sh", ["-c", `command -v ${HOOK_BIN}`], {
 			stdio: ["ignore", "pipe", "ignore"],
 		})
 			.toString()
 			.trim();
-		if (resolved.length > 0 && !isPathUnderNpxCache(resolved)) {
+		if (resolved.length > 0 && !isPathUnderTransientCache(resolved)) {
 			return HOOK_COMMAND_BARE;
 		}
 	} catch {
