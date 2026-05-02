@@ -9,12 +9,13 @@
 //     patcher used internally; exported so tests can drive it directly.
 //
 // Hook command resolution: the README's recommended install path is
-// `npx @keeperhub/wallet skill install`, which does not put the bin on the
-// system PATH. If we wrote a bare `keeperhub-wallet-hook` command in that
-// case, the hook would fire `command not found` on every tool call. So at
-// install time we probe PATH; if the bin resolves we keep the bare command
-// (lowest startup latency), otherwise we fall back to an `npx` invocation
-// that resolves regardless of where future shells run.
+// `npx -p @keeperhub/wallet keeperhub-wallet skill install`, which does
+// not put the bin on the system PATH. If we wrote a bare
+// `keeperhub-wallet-hook` command in that case, the hook would fire
+// `command not found` on every tool call. So at install time we probe
+// PATH; if the bin resolves we keep the bare command (lowest startup
+// latency), otherwise we fall back to an `npx` invocation that resolves
+// regardless of where future shells run.
 //
 // Idempotency rule: re-running the installer MUST NOT create a duplicate
 // hook entry. We filter any existing array element whose serialised form

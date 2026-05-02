@@ -45,11 +45,12 @@ export function readPackageVersion(): string {
  * `npx` invocations that path ends in `npx-cli.js` (or, on Windows, an `npx`
  * shim in node_modules/.bin).
  *
- * Why this matters: when the user runs `npx @keeperhub/wallet skill install`,
- * npx prepends its transient cache dir to PATH for the lifetime of the
- * installer. `command -v <bin>` therefore succeeds inside the installer, but
- * the cache dir disappears from PATH the moment npx exits — and any later
- * spawn (hook fire / MCP launch) would crash with `command not found`.
+ * Why this matters: when the user runs the install path
+ * (`npx -p @keeperhub/wallet keeperhub-wallet skill install`), npx prepends
+ * its transient cache dir to PATH for the lifetime of the installer.
+ * `command -v <bin>` therefore succeeds inside the installer, but the cache
+ * dir disappears from PATH the moment npx exits — and any later spawn (hook
+ * fire / MCP launch) would crash with `command not found`.
  */
 export function isNpxExecution(): boolean {
 	const execPath = process.env.npm_execpath;

@@ -37,7 +37,7 @@ Enables automatic payment of HTTP 402 responses (x402 on Base USDC + MPP on Temp
 **Recommended — one command, fully wired up:**
 
 ```
-npx @keeperhub/wallet skill install
+npx -p @keeperhub/wallet keeperhub-wallet skill install
 ```
 
 This writes the skill file into every detected agent directory under `$HOME` (Claude Code, Cursor, Cline, Windsurf, OpenCode) **and** registers the `keeperhub-wallet-hook` PreToolUse safety hook in `~/.claude/settings.json`. Re-running is safe — the installer is idempotent and preserves any foreign keys already in `settings.json`.
@@ -51,7 +51,7 @@ npx skills add keeperhub/agentic-wallet-skills
 This installs the skill file via the vercel-labs/skills convention but **does not register the PreToolUse safety hook**. Without the hook, signing operations are not gated by your auto/ask/block thresholds. After running `skills add` you MUST also run:
 
 ```
-npx @keeperhub/wallet skill install
+npx -p @keeperhub/wallet keeperhub-wallet skill install
 ```
 
 to activate the safety hook. The combination is safe — `skill install` is idempotent and will not duplicate the skill file written by `skills add`.
@@ -59,17 +59,17 @@ to activate the safety hook. The combination is safe — `skill install` is idem
 After install, provision a wallet with:
 
 ```
-npx @keeperhub/wallet add
+npx -p @keeperhub/wallet keeperhub-wallet add
 ```
 
 ## Commands
 
 Direct npm package invocation:
 
-- `npx @keeperhub/wallet add` — provision a new agentic wallet (no KeeperHub account required).
-- `npx @keeperhub/wallet info` — print `subOrgId` and `walletAddress` for the current wallet.
-- `npx @keeperhub/wallet fund` — print a Coinbase Onramp URL (Base USDC) and a Tempo deposit address.
-- `npx @keeperhub/wallet balance` — print on-chain balance across Base USDC and Tempo USDC.e.
+- `npx -p @keeperhub/wallet keeperhub-wallet add` — provision a new agentic wallet (no KeeperHub account required).
+- `npx -p @keeperhub/wallet keeperhub-wallet info` — print `subOrgId` and `walletAddress` for the current wallet.
+- `npx -p @keeperhub/wallet keeperhub-wallet fund` — print a Coinbase Onramp URL (Base USDC) and a Tempo deposit address.
+- `npx -p @keeperhub/wallet keeperhub-wallet balance` — print on-chain balance across Base USDC and Tempo USDC.e.
 
 Equivalent Go CLI wrappers (thin pass-through; delegate to the npm package):
 
@@ -85,7 +85,7 @@ Three-tier PreToolUse hook enforced on every signing call:
 - **ask** — amount above `auto_approve_max_usd` and at or below `block_threshold_usd` returns `{decision: "ask"}` so Claude Code surfaces an inline prompt in the agent chat.
 - **block** — amount above `block_threshold_usd`, or a contract not in `allowlisted_contracts`, is denied without calling `/sign`.
 
-Thresholds live in `~/.keeperhub/safety.json` (chmod 0o644). The `npx @keeperhub/wallet skill install` path registers the `keeperhub-wallet-hook` PreToolUse entry in `~/.claude/settings.json` automatically. For agents without auto-registration support (Cursor, Cline, Windsurf, OpenCode), the installer prints a copy-paste notice with the hook invocation.
+Thresholds live in `~/.keeperhub/safety.json` (chmod 0o644). The `npx -p @keeperhub/wallet keeperhub-wallet skill install` path registers the `keeperhub-wallet-hook` PreToolUse entry in `~/.claude/settings.json` automatically. For agents without auto-registration support (Cursor, Cline, Windsurf, OpenCode), the installer prints a copy-paste notice with the hook invocation.
 
 The hook reads only the payment-challenge fields `amount`, `unit`, and the asset contract address from the tool payload. Forged fields like `trust-level hint`, `is-safe boolean`, or `admin-override bit` are ignored by design (GUARD-05).
 
