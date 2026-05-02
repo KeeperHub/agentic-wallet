@@ -26,7 +26,16 @@
 // hooks.PreToolUse MUST be byte-preserved. We only ever touch
 // hooks.PreToolUse; any foreign hooks.PostToolUse entries survive verbatim.
 
-import { chmod, copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import {
+	chmod,
+	copyFile,
+	mkdir,
+	readFile,
+	rename,
+	unlink,
+	writeFile,
+} from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type AgentTarget, detectAgents } from "./agent-detect.js";
@@ -256,9 +265,25 @@ export async function registerClaudeCodeHook(
 
 	await mkdir(dirname(settingsPath), { recursive: true, mode: 0o700 });
 	const payload = `${JSON.stringify(config, null, 2)}\n`;
-	await writeFile(settingsPath, payload, { mode: 0o600 });
-	// Reassert mode in case the file already existed with looser perms.
-	await chmod(settingsPath, 0o600);
+	// Atomic write: tmp + rename so a crash mid-write cannot truncate the
+	// user's settings.json (which on Claude Code typically holds many
+	// unrelated PreToolUse/PostToolUse entries plus mcpServers, theme, etc.).
+	// rename(2) is the atomic step on every POSIX filesystem and on Windows
+	// NTFS — the live file is either the old contents or the full new
+	// contents, never partial. chmod the tmp before rename so the live
+	// permissions are correct from the first readable byte.
+	const suffix = randomBytes(8).toString("hex");
+	const tmpPath = `${settingsPath}.${process.pid}.${suffix}.tmp`;
+	try {
+		await writeFile(tmpPath, payload, { mode: 0o600 });
+		await chmod(tmpPath, 0o600);
+		await rename(tmpPath, settingsPath);
+	} catch (err) {
+		await unlink(tmpPath).catch(() => {
+			// best-effort cleanup; ignore ENOENT and other failures
+		});
+		throw err;
+	}
 }
 
 async function writeSkillToAgent(

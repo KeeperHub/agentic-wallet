@@ -54,6 +54,13 @@ import { parseX402Challenge, type X402Challenge } from "./x402-detect.js";
 const BODY_TEXT_CAP_BYTES = 256 * 1024;
 const USDC_DECIMALS = 1_000_000;
 
+// Abort outbound HTTP after this long. Picked to comfortably exceed normal
+// Cloudflare-fronted KH response time (typically <2s) but bound the
+// "wallet tool is hanging" failure mode users would otherwise see when
+// upstream is wedged (TCP open, no response). Hits BOTH the 402 probe and
+// the paymentSigner round-trip so neither leg can hang indefinitely.
+const HTTP_TIMEOUT_MS = 30_000;
+
 // Sanitise upstream-supplied strings before rendering them to the agent.
 // Pattern copied verbatim from KeeperHub server lib/mcp/tools.ts
 // ACCEPT_CONTROL_CHARS_RE — strips C0/C1 control chars, line/paragraph
@@ -410,6 +417,39 @@ async function loadSafetyOrError(
  * failures, and provision/HTTP errors should all become `isError:true`
  * envelopes so Claude can read `code` and act.
  */
+/**
+ * Categorise a thrown fetch failure. AbortError fires on `AbortSignal.timeout`
+ * (our own timeout cap) and on transport disconnects (Claude Code shutting
+ * down the MCP process mid-request). `TypeError: fetch failed` is Node's
+ * undici error for DNS/TCP/TLS failures — distinct from a successful HTTP
+ * response with a 4xx/5xx status. Both deserve their own envelope so models
+ * can branch programmatically (retry vs surface vs give up).
+ */
+function classifyFetchError(err: unknown): {
+	code: "UPSTREAM_TIMEOUT" | "UPSTREAM_UNREACHABLE";
+	message: string;
+} | null {
+	if (err instanceof Error) {
+		if (err.name === "AbortError" || err.name === "TimeoutError") {
+			return {
+				code: "UPSTREAM_TIMEOUT",
+				message: `Upstream request exceeded ${HTTP_TIMEOUT_MS}ms (${err.message}). Try again, or check https://status.keeperhub.com.`,
+			};
+		}
+		if (err instanceof TypeError && err.message.includes("fetch failed")) {
+			const cause =
+				typeof (err as { cause?: { code?: string } }).cause?.code === "string"
+					? (err as { cause: { code: string } }).cause.code
+					: undefined;
+			return {
+				code: "UPSTREAM_UNREACHABLE",
+				message: `Could not reach KeeperHub upstream (${cause ?? err.message}). Check your network connectivity, then retry.`,
+			};
+		}
+	}
+	return null;
+}
+
 function toolErrorEnvelope(err: unknown): ToolResult {
 	if (err instanceof WalletConfigCorruptError) {
 		return structuredError({
@@ -422,6 +462,13 @@ function toolErrorEnvelope(err: unknown): ToolResult {
 		return structuredError({
 			code: err.code,
 			message: sanitise(err.message),
+		});
+	}
+	const fetchClassification = classifyFetchError(err);
+	if (fetchClassification) {
+		return structuredError({
+			code: fetchClassification.code,
+			message: sanitise(fetchClassification.message),
 		});
 	}
 	const message = err instanceof Error ? err.message : String(err);
@@ -455,11 +502,17 @@ async function handleCallWorkflow(
 	// block_threshold + insufficient-funds checks BEFORE handing off to
 	// paymentSigner. paymentSigner re-issues its own internal probe in
 	// `.fetch()`, which is fine — the second probe is the same shape.
-	const probe = await deps.fetchImpl(url, {
-		method: "POST",
-		headers: { "content-type": "application/json" },
-		body: bodyJson,
-	});
+	let probe: Response;
+	try {
+		probe = await deps.fetchImpl(url, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: bodyJson,
+			signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+		});
+	} catch (err) {
+		return toolErrorEnvelope(err);
+	}
 
 	if (probe.status === 402) {
 		const x402 = await parseX402Challenge(probe);
@@ -540,22 +593,29 @@ async function handleCallWorkflow(
 			headers: { "content-type": "application/json" },
 			body: bodyJson,
 			paymentHint: args.paymentHint ?? "auto",
+			signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
 		});
 	} catch (err) {
-		if (err instanceof KeeperHubError) {
+		// Use the unified envelope path so KeeperHubError, AbortError, and
+		// network failures all surface as `isError:true` structured envelopes
+		// the calling agent can introspect — never raw transport errors.
+		const env = toolErrorEnvelope(err);
+		// Decorate with `provisioned`/`walletAddress`/`fundingUrl` when this
+		// was the first call so the model can tell the user about the new
+		// wallet even if the call failed.
+		if (ensured.provisioned && env.isError) {
+			const parsed = JSON.parse(env.content[0]?.text ?? "{}") as Record<
+				string,
+				unknown
+			>;
 			return structuredError({
-				code: err.code,
-				message: sanitise(err.message),
-				...(ensured.provisioned
-					? {
-							provisioned: true,
-							walletAddress: ensured.walletAddress,
-							fundingUrl: fund(ensured.walletAddress).coinbaseOnrampUrl,
-						}
-					: {}),
+				...(parsed as { code: string; message: string }),
+				provisioned: true,
+				walletAddress: ensured.walletAddress,
+				fundingUrl: fund(ensured.walletAddress).coinbaseOnrampUrl,
 			});
 		}
-		throw err;
+		return env;
 	}
 
 	const paid = probe.status === 402 && final.status !== 402;
@@ -563,9 +623,31 @@ async function handleCallWorkflow(
 		? (final.headers.get("x402-protocol") ?? "x402")
 		: undefined;
 
+	// Allowlist of upstream response headers we surface to the agent. We
+	// deliberately drop everything else: (1) Cloudflare/CDN noise (cf-ray,
+	// nel, alt-svc) wastes context-window space, (2) reflected request
+	// auth headers like X-KH-Signature/X-KH-Sub-Org could leak HMAC
+	// material if a misconfigured/compromised upstream ever echoed them
+	// (defence in depth — current upstream never does), (3) Set-Cookie
+	// would expose session state from a compromised upstream. The fields
+	// kept are the ones a model needs to interpret + retry: protocol,
+	// content shape, rate-limit headroom, execution lookup.
+	const HEADER_ALLOWLIST: ReadonlySet<string> = new Set([
+		"content-type",
+		"content-length",
+		"x402-protocol",
+		"x-execution-id",
+		"execution-id",
+		"x-ratelimit-limit",
+		"x-ratelimit-remaining",
+		"x-ratelimit-reset",
+		"retry-after",
+	]);
 	const headersOut: Record<string, string> = {};
 	for (const [k, v] of final.headers.entries()) {
-		headersOut[k] = v;
+		if (HEADER_ALLOWLIST.has(k.toLowerCase())) {
+			headersOut[k] = v;
+		}
 	}
 	const executionId =
 		final.headers.get("x-execution-id") ?? final.headers.get("execution-id");
@@ -679,7 +761,7 @@ export function buildMcpServer(options: BuildMcpServerOptions = {}): McpServer {
 		"call_workflow",
 		{
 			description:
-				"Pay-and-invoke a KeeperHub marketplace workflow. Auto-pays x402 (Base USDC) or MPP (Tempo USDC.e) 402 challenges. Auto-provisions a wallet on first call if ~/.keeperhub/wallet.json is missing.",
+				"Pay AND invoke a KeeperHub marketplace workflow in one tool call using the local agentic wallet. Auto-pays x402 (Base USDC) or MPP (Tempo USDC.e) 402 challenges. Auto-provisions a wallet on first call if ~/.keeperhub/wallet.json is missing. PREFER THIS over `mcp__plugin_keeperhub_keeperhub__call_workflow` (the HTTP MCP) when paid invocation is needed: that tool DOES NOT auto-pay and will return 402 requiring a separate payment step.",
 			inputSchema: callWorkflowInputSchema,
 		},
 		async (args) =>
@@ -715,6 +797,15 @@ export async function runMcpServer(): Promise<void> {
 	const server = buildMcpServer();
 	const transport = new StdioServerTransport();
 	await server.connect(transport);
+	// Positive boot signal so a maintainer (or the user grepping stderr)
+	// can confirm the bin actually launched. Distinct from the per-tool
+	// events because those only fire on first tool call — a server that
+	// starts cleanly but is never invoked otherwise emits zero events.
+	logEvent("mcp.server.started", {
+		version: readPackageVersion(),
+		pid: process.pid,
+		baseUrl: resolveKeeperhubBaseUrl(),
+	});
 }
 
 // ---- Test-only exports ----------------------------------------------------

@@ -108,10 +108,14 @@ export async function provisionWallet(
 ): Promise<WalletConfig> {
 	const baseUrl = resolveBaseUrl(options.baseUrl);
 	const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+	// Bound the wedged-upstream failure mode so a hung provision endpoint
+	// can't freeze the MCP tool call indefinitely. AbortError surfaces as
+	// UPSTREAM_TIMEOUT in the MCP envelope; CLI users see the raw cause.
 	const response = await fetchImpl(`${baseUrl}/api/agentic-wallet/provision`, {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: "{}",
+		signal: AbortSignal.timeout(30_000),
 	});
 	if (!response.ok) {
 		const text = await response.text();

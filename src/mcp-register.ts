@@ -17,7 +17,15 @@
 // byte-preserved. We read the file, parse, mutate only our slot, and write
 // back. Same chmod 0o600 semantics as registerClaudeCodeHook.
 
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import {
+	chmod,
+	mkdir,
+	readFile,
+	rename,
+	unlink,
+	writeFile,
+} from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { AgentTarget } from "./agent-detect.js";
@@ -134,10 +142,32 @@ async function readJsonOrEmpty<T>(path: string): Promise<T> {
 	}
 }
 
+/**
+ * Truly-atomic write to a config file. Writes to a randomly-suffixed sibling
+ * tmp file then `rename(2)`s into place — the rename is the atomic step on
+ * every POSIX filesystem and on Windows NTFS, so a crash, signal, ENOSPC,
+ * or EIO mid-write CANNOT leave the live config truncated. Critical for
+ * `~/.claude.json` (100KB+, holds the user's MCP allowlist + project state)
+ * and for any settings.json where a torn write would brick Claude Code.
+ *
+ * Best-effort cleanup of the tmp file on rename failure so we don't
+ * accumulate `*.tmp` siblings. The chmod happens on the tmp before rename
+ * so the live file's permissions are correct from the first byte readable.
+ */
 async function writeJsonAtomic(path: string, payload: string): Promise<void> {
 	await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-	await writeFile(path, payload, { mode: 0o600 });
-	await chmod(path, 0o600);
+	const suffix = randomBytes(8).toString("hex");
+	const tmpPath = `${path}.${process.pid}.${suffix}.tmp`;
+	try {
+		await writeFile(tmpPath, payload, { mode: 0o600 });
+		await chmod(tmpPath, 0o600);
+		await rename(tmpPath, path);
+	} catch (err) {
+		await unlink(tmpPath).catch(() => {
+			// best-effort cleanup; ignore ENOENT and other failures
+		});
+		throw err;
+	}
 }
 
 async function writeStandardMcp(

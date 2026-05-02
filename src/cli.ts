@@ -132,6 +132,25 @@ export async function runCli(argv: string[] = process.argv): Promise<void> {
 							process.stderr.write(
 								`notice: ${reg.agent} -> ${reg.message ?? ""}\n`,
 							);
+						} else if (reg.status === "failed") {
+							process.stderr.write(
+								`hook: ${reg.agent} -> FAILED (${reg.message ?? "unknown error"})\n`,
+							);
+						}
+					}
+					for (const reg of result.mcpRegistrations) {
+						if (reg.status === "registered") {
+							process.stdout.write(
+								`mcp: ${reg.agent} -> registered at ${reg.path ?? "(unknown path)"}\n`,
+							);
+						} else if (reg.status === "notice") {
+							process.stderr.write(
+								`notice: ${reg.agent} mcp -> ${reg.message ?? ""}\n`,
+							);
+						} else if (reg.status === "failed") {
+							process.stderr.write(
+								`mcp: ${reg.agent} -> FAILED (${reg.message ?? "unknown error"})\n`,
+							);
 						}
 					}
 					if (result.skillWrites.length === 0) {

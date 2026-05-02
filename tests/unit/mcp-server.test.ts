@@ -388,6 +388,72 @@ describe("call_workflow tool — PAYMENT_REQUIRED_UNPARSEABLE", () => {
 	});
 });
 
+describe("call_workflow tool — UPSTREAM_TIMEOUT / UPSTREAM_UNREACHABLE", () => {
+	it("AbortError on the probe surfaces UPSTREAM_TIMEOUT (signer NOT called)", async () => {
+		const abortErr = new Error("The operation was aborted due to timeout");
+		abortErr.name = "TimeoutError";
+		const fetchImpl: typeof fetch = () => Promise.reject(abortErr);
+		const signerStub = buildSignerStub(new Response("unreached"));
+
+		const deps = buildDeps({
+			fetchImpl,
+			paymentSigner: signerStub.signer,
+		});
+
+		const result = await handleCallWorkflow({ slug: SLUG }, deps);
+		expect(result.isError).toBe(true);
+		const parsed = parseToolJson(result.content[0]?.text ?? "");
+		expect(parsed.code).toBe("UPSTREAM_TIMEOUT");
+		expect(signerStub.calls).toHaveLength(0);
+	});
+
+	it("Network failure on probe surfaces UPSTREAM_UNREACHABLE (signer NOT called)", async () => {
+		const dnsErr = new TypeError("fetch failed");
+		(dnsErr as { cause?: { code?: string } }).cause = { code: "ENOTFOUND" };
+		const fetchImpl: typeof fetch = () => Promise.reject(dnsErr);
+		const signerStub = buildSignerStub(new Response("unreached"));
+
+		const deps = buildDeps({
+			fetchImpl,
+			paymentSigner: signerStub.signer,
+		});
+
+		const result = await handleCallWorkflow({ slug: SLUG }, deps);
+		expect(result.isError).toBe(true);
+		const parsed = parseToolJson(result.content[0]?.text ?? "");
+		expect(parsed.code).toBe("UPSTREAM_UNREACHABLE");
+		// Cause code is included so the model can see DNS-vs-TLS-vs-reset.
+		expect(parsed.message).toContain("ENOTFOUND");
+		expect(signerStub.calls).toHaveLength(0);
+	});
+
+	it("paymentSigner.fetch network failure also surfaces UPSTREAM_UNREACHABLE (not raw rethrow)", async () => {
+		// Regression guard for the M-OPS-5 fix: previously a non-KeeperHubError
+		// thrown by paymentSigner.fetch escaped past the structured-error
+		// envelope and surfaced as a transport explosion. Now it lands as a
+		// classified envelope.
+		const probe = build402Probe({ withChallenge: "x402" });
+		const stubFetch = buildStubFetch([probe]);
+		const dnsErr = new TypeError("fetch failed");
+		(dnsErr as { cause?: { code?: string } }).cause = { code: "ECONNRESET" };
+		const signer: PaymentSigner = {
+			fetch: () => Promise.reject(dnsErr),
+			pay: () =>
+				Promise.reject(new Error("pay should not be reached in this test")),
+		};
+
+		const deps = buildDeps({
+			fetchImpl: stubFetch.fn,
+			paymentSigner: signer,
+		});
+
+		const result = await handleCallWorkflow({ slug: SLUG }, deps);
+		expect(result.isError).toBe(true);
+		const parsed = parseToolJson(result.content[0]?.text ?? "");
+		expect(parsed.code).toBe("UPSTREAM_UNREACHABLE");
+	});
+});
+
 describe("auto-provision on first call", () => {
 	it("missing wallet.json triggers provisionWallet, returns provisioned:true; second call does NOT re-provision", async () => {
 		let provisionCount = 0;
