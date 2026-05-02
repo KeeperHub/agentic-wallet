@@ -18,7 +18,6 @@ description: |
   safety thresholds in ~/.keeperhub/safety.json.
 
   Install with `npx @keeperhub/wallet skill install`.
-version: 0.1.7
 license: Apache-2.0
 ---
 
