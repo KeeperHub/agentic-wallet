@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.12](https://github.com/KeeperHub/agentic-wallet/compare/wallet-v0.1.11...wallet-v0.1.12) (2026-05-02)
+
+
+### Features
+
+* **mcp:** add keeperhub-wallet stdio MCP server ([fe60c7b](https://github.com/KeeperHub/agentic-wallet/commit/fe60c7ba0fbd0d619bec1d3b3814c4355c5f4df6))
+* **mcp:** add keeperhub-wallet stdio MCP server ([c344f4b](https://github.com/KeeperHub/agentic-wallet/commit/c344f4b21d887cd9c7e3992730223241164b3994))
+
+
+### Bug Fixes
+
+* **mcp:** review feedback — provision race, corrupt-config, error envelopes ([29391cc](https://github.com/KeeperHub/agentic-wallet/commit/29391ccd6b8d9e9932248712b19a8257715f6667))
+* **mcp:** security/DX/ops review feedback — atomic writes, timeouts, header allowlist ([bfbac19](https://github.com/KeeperHub/agentic-wallet/commit/bfbac191372953bafb4cf6bf8e2c7778a88cf114))
+
 ## [0.1.11](https://github.com/KeeperHub/agentic-wallet/compare/wallet-v0.1.10...wallet-v0.1.11) (2026-05-02)
 
 
