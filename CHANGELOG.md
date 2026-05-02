@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.10](https://github.com/KeeperHub/agentic-wallet/compare/wallet-v0.1.9...wallet-v0.1.10) (2026-05-02)
+
+
+### Bug Fixes
+
+* **skill:** expand description with brand name + explicit trigger phrases ([1f707b1](https://github.com/KeeperHub/agentic-wallet/commit/1f707b1ea6c7dbb84501aecb2c9078a1ccc1302a))
+* **skill:** expand description with brand name + explicit trigger phrases ([b042d20](https://github.com/KeeperHub/agentic-wallet/commit/b042d20e98c1619b354af23b8a68542f8f6e7551))
+
 ## [0.1.9](https://github.com/KeeperHub/agentic-wallet/compare/wallet-v0.1.8...wallet-v0.1.9) (2026-05-01)
 
 
