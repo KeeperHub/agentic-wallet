@@ -30,14 +30,21 @@ import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { checkBalance } from "./balance.js";
+import { type BalanceSnapshot, checkBalance } from "./balance.js";
 import { fund } from "./fund.js";
 import { parseMppChallenge } from "./mpp-detect.js";
-import { paymentSigner } from "./payment-signer.js";
+import {
+	paymentSigner as defaultPaymentSigner,
+	type PaymentSigner,
+} from "./payment-signer.js";
 import { provisionWallet } from "./provision.js";
 import { loadSafetyConfig, type SafetyConfig } from "./safety-config.js";
 import { readWalletConfig } from "./storage.js";
-import { KeeperHubError, WalletConfigMissingError } from "./types.js";
+import {
+	KeeperHubError,
+	type WalletConfig,
+	WalletConfigMissingError,
+} from "./types.js";
 import { parseX402Challenge, type X402Challenge } from "./x402-detect.js";
 
 // 256 KB ceiling on bodyText returned to the model. Larger bodies are
@@ -149,6 +156,34 @@ function structuredOk(payload: Record<string, unknown>): ToolResult {
 	};
 }
 
+// ---- Dependency injection (test seam) -------------------------------------
+
+/**
+ * Test seam: every external boundary the handlers touch is collected here so
+ * `tests/unit/mcp-server.test.ts` can inject mocks without monkey-patching
+ * module globals. Production code passes nothing — defaults bind to the real
+ * implementations and the public API of `buildMcpServer()` does not change.
+ */
+export type McpServerDeps = {
+	readWalletConfig: () => Promise<WalletConfig>;
+	provisionWallet: () => Promise<WalletConfig>;
+	loadSafetyConfig: () => Promise<SafetyConfig>;
+	checkBalance: (wallet: WalletConfig) => Promise<BalanceSnapshot>;
+	paymentSigner: PaymentSigner;
+	fetchImpl: typeof fetch;
+};
+
+function defaultDeps(): McpServerDeps {
+	return {
+		readWalletConfig,
+		provisionWallet: () => provisionWallet(),
+		loadSafetyConfig,
+		checkBalance: (wallet) => checkBalance(wallet),
+		paymentSigner: defaultPaymentSigner,
+		fetchImpl: globalThis.fetch,
+	};
+}
+
 // ---- Auto-provisioning ----------------------------------------------------
 
 type EnsureWalletResult = {
@@ -164,9 +199,9 @@ type EnsureWalletResult = {
  * plus a `provisioned` flag so callers can surface "I created a wallet at
  * 0xABC; here's how to fund it" guidance to the user on the first call.
  */
-async function ensureWallet(): Promise<EnsureWalletResult> {
+async function ensureWallet(deps: McpServerDeps): Promise<EnsureWalletResult> {
 	try {
-		const wallet = await readWalletConfig();
+		const wallet = await deps.readWalletConfig();
 		return {
 			provisioned: false,
 			walletAddress: wallet.walletAddress,
@@ -177,7 +212,7 @@ async function ensureWallet(): Promise<EnsureWalletResult> {
 		if (!(err instanceof WalletConfigMissingError)) {
 			throw err;
 		}
-		const wallet = await provisionWallet();
+		const wallet = await deps.provisionWallet();
 		logEvent("mcp.wallet.provisioned", {
 			walletAddress: wallet.walletAddress,
 		});
@@ -285,9 +320,12 @@ type CallWorkflowArgs = {
 	responseFormat?: "text" | "base64" | "json";
 };
 
-async function handleCallWorkflow(args: CallWorkflowArgs): Promise<ToolResult> {
-	const safety: SafetyConfig = await loadSafetyConfig();
-	const ensured = await ensureWallet();
+async function handleCallWorkflow(
+	args: CallWorkflowArgs,
+	deps: McpServerDeps,
+): Promise<ToolResult> {
+	const safety: SafetyConfig = await deps.loadSafetyConfig();
+	const ensured = await ensureWallet(deps);
 	const baseUrl = resolveKeeperhubBaseUrl();
 	const url = `${baseUrl}/api/mcp/workflows/${encodeURIComponent(args.slug)}/call`;
 	const bodyJson = JSON.stringify(args.body ?? {});
@@ -296,7 +334,7 @@ async function handleCallWorkflow(args: CallWorkflowArgs): Promise<ToolResult> {
 	// block_threshold + insufficient-funds checks BEFORE handing off to
 	// paymentSigner. paymentSigner re-issues its own internal probe in
 	// `.fetch()`, which is fine — the second probe is the same shape.
-	const probe = await fetch(url, {
+	const probe = await deps.fetchImpl(url, {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: bodyJson,
@@ -336,7 +374,7 @@ async function handleCallWorkflow(args: CallWorkflowArgs): Promise<ToolResult> {
 			// Insufficient on-chain balance check (x402 only — MPP credential is
 			// opaque). Surface a structured error pointing the user at funding
 			// instructions instead of letting the retry burn through to a 4xx.
-			const balanceSnap = await checkBalance({
+			const balanceSnap = await deps.checkBalance({
 				subOrgId: ensured.subOrgId,
 				walletAddress: ensured.walletAddress,
 				hmacSecret: ensured.hmacSecret,
@@ -376,7 +414,7 @@ async function handleCallWorkflow(args: CallWorkflowArgs): Promise<ToolResult> {
 	// PAYMENT-SIGNATURE, and returns the post-payment Response.
 	let final: Response;
 	try {
-		final = await paymentSigner.fetch(url, {
+		final = await deps.paymentSigner.fetch(url, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: bodyJson,
@@ -456,9 +494,9 @@ async function handleCallWorkflow(args: CallWorkflowArgs): Promise<ToolResult> {
 	return structuredOk(result);
 }
 
-async function handleBalance(): Promise<ToolResult> {
-	const ensured = await ensureWallet();
-	const snap = await checkBalance({
+async function handleBalance(deps: McpServerDeps): Promise<ToolResult> {
+	const ensured = await ensureWallet(deps);
+	const snap = await deps.checkBalance({
 		subOrgId: ensured.subOrgId,
 		walletAddress: ensured.walletAddress,
 		hmacSecret: ensured.hmacSecret,
@@ -475,11 +513,11 @@ async function handleBalance(): Promise<ToolResult> {
 	});
 }
 
-async function handleInfo(): Promise<ToolResult> {
+async function handleInfo(deps: McpServerDeps): Promise<ToolResult> {
 	// CRITICAL: never include hmacSecret. Same rule as src/cli.ts cmdAdd at
 	// lines 113-115 (T-34-cli-02 mitigation). The CLI prints only public
 	// fields; the MCP server mirrors that exactly.
-	const ensured = await ensureWallet();
+	const ensured = await ensureWallet(deps);
 	return structuredOk({
 		subOrgId: ensured.subOrgId,
 		walletAddress: ensured.walletAddress,
@@ -494,7 +532,13 @@ async function handleInfo(): Promise<ToolResult> {
 
 // ---- Server bootstrap -----------------------------------------------------
 
-export function buildMcpServer(): McpServer {
+export type BuildMcpServerOptions = {
+	/** Inject mock dependencies (tests). Defaults to {@link defaultDeps}. */
+	deps?: Partial<McpServerDeps>;
+};
+
+export function buildMcpServer(options: BuildMcpServerOptions = {}): McpServer {
+	const deps: McpServerDeps = { ...defaultDeps(), ...options.deps };
 	const server = new McpServer({
 		name: "keeperhub-wallet",
 		version: readPackageVersion(),
@@ -508,7 +552,9 @@ export function buildMcpServer(): McpServer {
 			inputSchema: callWorkflowInputSchema,
 		},
 		async (args) =>
-			await withToolLogging("call_workflow", () => handleCallWorkflow(args)),
+			await withToolLogging("call_workflow", () =>
+				handleCallWorkflow(args, deps),
+			),
 	);
 
 	server.registerTool(
@@ -518,7 +564,7 @@ export function buildMcpServer(): McpServer {
 				"Return the wallet's on-chain balance: Base USDC + Tempo USDC.e. Auto-provisions a wallet on first call.",
 			inputSchema: {},
 		},
-		async () => await withToolLogging("balance", () => handleBalance()),
+		async () => await withToolLogging("balance", () => handleBalance(deps)),
 	);
 
 	server.registerTool(
@@ -528,7 +574,7 @@ export function buildMcpServer(): McpServer {
 				"Return public wallet metadata (subOrgId, walletAddress). Never returns the HMAC secret. Auto-provisions a wallet on first call.",
 			inputSchema: {},
 		},
-		async () => await withToolLogging("info", () => handleInfo()),
+		async () => await withToolLogging("info", () => handleInfo(deps)),
 	);
 
 	return server;
@@ -539,3 +585,17 @@ export async function runMcpServer(): Promise<void> {
 	const transport = new StdioServerTransport();
 	await server.connect(transport);
 }
+
+// ---- Test-only exports ----------------------------------------------------
+//
+// Exported so unit tests can call the handlers directly without spinning up
+// the stdio transport. The handlers are pure async functions of (args, deps)
+// and (deps) — they never reach for module globals after this refactor.
+
+export const __test__ = {
+	handleCallWorkflow,
+	handleBalance,
+	handleInfo,
+	defaultDeps,
+	BODY_TEXT_CAP_BYTES,
+};
