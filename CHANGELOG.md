@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.13](https://github.com/KeeperHub/agentic-wallet/compare/wallet-v0.1.12...wallet-v0.1.13) (2026-05-07)
+
+
+### Features
+
+* add feedback CLI command and MCP tool ([38c7cc3](https://github.com/KeeperHub/agentic-wallet/commit/38c7cc31c2684adceff2ed91587a992bbbd8ccf1))
+
 ## [0.1.12](https://github.com/KeeperHub/agentic-wallet/compare/wallet-v0.1.11...wallet-v0.1.12) (2026-05-02)
 
 
