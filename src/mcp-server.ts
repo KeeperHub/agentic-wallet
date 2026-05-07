@@ -1,8 +1,14 @@
-// stdio MCP server exposing 3 tools backed by @keeperhub/wallet:
+// stdio MCP server exposing 4 tools backed by @keeperhub/wallet:
 //
-//   - call_workflow : pay-and-invoke a KeeperHub marketplace workflow
-//   - balance       : on-chain balance snapshot (Base USDC + Tempo USDC.e)
-//   - info          : public wallet metadata (subOrgId, walletAddress)
+//   - call_workflow   : pay-and-invoke a KeeperHub marketplace workflow
+//   - balance         : on-chain balance snapshot (Base USDC + Tempo USDC.e)
+//   - info            : public wallet metadata (subOrgId, walletAddress)
+//   - submit_feedback : submit ERC-8004 ReputationRegistry feedback for a
+//                       workflow execution the wallet paid for. Signs and
+//                       broadcasts a giveFeedback() tx on Ethereum mainnet
+//                       via the server-side proxy. Caller wallet pays gas
+//                       natively (~$3-10 USD per call); future improvement
+//                       is gas sponsorship via Pimlico or Turnkey native.
 //
 // Design intent: the user wants to install one package (`@keeperhub/wallet`)
 // and immediately call paid workflows from Claude Code without writing a Node
@@ -32,6 +38,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { type BalanceSnapshot, checkBalance } from "./balance.js";
 import { fund } from "./fund.js";
+import { buildHmacHeaders } from "./hmac.js";
 import { parseMppChallenge } from "./mpp-detect.js";
 import {
 	paymentSigner as defaultPaymentSigner,
@@ -743,6 +750,154 @@ async function handleInfo(deps: McpServerDeps): Promise<ToolResult> {
 	});
 }
 
+// ---- submit_feedback -----------------------------------------------------
+
+const submitFeedbackInputSchema = {
+	executionId: z
+		.string()
+		.min(1)
+		.describe(
+			"Workflow execution id returned in the `executionId` field of a previous successful call_workflow response.",
+		),
+	value: z
+		.number()
+		.int()
+		.describe(
+			"Rating value as a raw int128. With valueDecimals=0 this is a 1-5 star score; with valueDecimals=1 it is 0.1-step score. Server validates int128 range.",
+		),
+	valueDecimals: z
+		.number()
+		.int()
+		.min(0)
+		.max(18)
+		.describe(
+			"Decimals for value. Use 0 for an integer 1-5 score, 1 for a 0.1-step 0-50 score, etc.",
+		),
+	comment: z
+		.string()
+		.max(2000)
+		.optional()
+		.describe(
+			"Optional plain-text comment included in the feedbackURI JSON.",
+		),
+	agentChainId: z
+		.number()
+		.int()
+		.optional()
+		.describe(
+			"Chain id where the rated agent NFT lives. Defaults to 1 (Ethereum mainnet); only 1 is supported today.",
+		),
+	agentId: z
+		.string()
+		.optional()
+		.describe(
+			"Rated agent NFT id (uint256, decimal string). Defaults to KeeperHub's own ERC-8004 agent (31875).",
+		),
+};
+
+type SubmitFeedbackArgs = {
+	executionId: string;
+	value: number;
+	valueDecimals: number;
+	comment?: string;
+	agentChainId?: number;
+	agentId?: string;
+};
+
+async function handleSubmitFeedback(
+	args: SubmitFeedbackArgs,
+	deps: McpServerDeps,
+): Promise<ToolResult> {
+	let ensured: EnsureWalletResult;
+	try {
+		ensured = await ensureWallet(deps);
+	} catch (err) {
+		return toolErrorEnvelope(err);
+	}
+	const baseUrl = resolveKeeperhubBaseUrl();
+	const path = "/api/agentic-wallet/feedback";
+	const url = `${baseUrl}${path}`;
+
+	// Stringify the args as the request body. The server enforces input
+	// validation -- we forward verbatim so any future schema additions on
+	// the server propagate without client-side changes.
+	const body = JSON.stringify({
+		executionId: args.executionId,
+		value: args.value,
+		valueDecimals: args.valueDecimals,
+		...(args.comment !== undefined ? { comment: args.comment } : {}),
+		...(args.agentChainId !== undefined
+			? { agentChainId: args.agentChainId }
+			: {}),
+		...(args.agentId !== undefined ? { agentId: args.agentId } : {}),
+	});
+
+	const hmacHeaders = buildHmacHeaders(
+		ensured.hmacSecret,
+		"POST",
+		path,
+		ensured.subOrgId,
+		body,
+	);
+
+	let response: Response;
+	try {
+		response = await deps.fetchImpl(url, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				...hmacHeaders,
+			},
+			body,
+			signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+		});
+	} catch (err) {
+		return toolErrorEnvelope(err);
+	}
+
+	let parsedBody: unknown;
+	try {
+		parsedBody = await response.json();
+	} catch {
+		const fallback = await response.text();
+		return structuredError({
+			code: "FEEDBACK_UNPARSEABLE_RESPONSE",
+			message: sanitise(
+				`Server returned non-JSON ${response.status}: ${fallback.slice(0, 512)}`,
+			),
+		});
+	}
+
+	if (!response.ok) {
+		const errBody = parsedBody as {
+			error?: string;
+			code?: string;
+			feedbackId?: string;
+		};
+		return structuredError({
+			code: errBody.code ?? `FEEDBACK_HTTP_${response.status}`,
+			message: sanitise(errBody.error ?? `HTTP ${response.status}`),
+			...(errBody.feedbackId ? { feedbackId: errBody.feedbackId } : {}),
+		});
+	}
+
+	const okBody = parsedBody as {
+		feedbackId?: string;
+		txHash?: string;
+		publicUrl?: string;
+	};
+	return structuredOk({
+		feedbackId: okBody.feedbackId,
+		txHash: okBody.txHash,
+		publicUrl: okBody.publicUrl,
+		// Help the agent surface a confirmation message.
+		summary:
+			okBody.txHash !== undefined
+				? `Feedback submitted on-chain. Tx: ${okBody.txHash}`
+				: "Feedback submitted",
+	});
+}
+
 // ---- Server bootstrap -----------------------------------------------------
 
 export type BuildMcpServerOptions = {
@@ -788,6 +943,19 @@ export function buildMcpServer(options: BuildMcpServerOptions = {}): McpServer {
 			inputSchema: {},
 		},
 		async () => await withToolLogging("info", () => handleInfo(deps)),
+	);
+
+	server.registerTool(
+		"feedback",
+		{
+			description:
+				"Submit ERC-8004 ReputationRegistry feedback for a workflow execution this wallet paid for. Signs and broadcasts a giveFeedback() transaction on Ethereum mainnet via the KeeperHub server proxy. Caller wallet pays gas natively (~$0.05-2 per call at typical mainnet gas). Use AFTER call_workflow returns successfully and the user has confirmed they want to rate the workflow. The executionId comes from the call_workflow response. Defaults to rating KeeperHub's own ERC-8004 agent (id 31875 on Ethereum) but agentId/agentChainId may be overridden to rate any agent.",
+			inputSchema: submitFeedbackInputSchema,
+		},
+		async (args) =>
+			await withToolLogging("feedback", () =>
+				handleSubmitFeedback(args, deps),
+			),
 	);
 
 	return server;
