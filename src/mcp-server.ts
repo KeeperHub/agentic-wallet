@@ -44,6 +44,10 @@ import {
 	paymentSigner as defaultPaymentSigner,
 	type PaymentSigner,
 } from "./payment-signer.js";
+import {
+	checkFeedbackGas,
+	type FeedbackGasCheckResult,
+} from "./feedback-gas.js";
 import { provisionWallet } from "./provision.js";
 import { loadSafetyConfig, type SafetyConfig } from "./safety-config.js";
 import { readWalletConfig } from "./storage.js";
@@ -171,6 +175,50 @@ function structuredOk(payload: Record<string, unknown>): ToolResult {
 	};
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function readResponseBodyOnce(
+	response: Response,
+): Promise<{ json: unknown; text: string }> {
+	const text = await response.text();
+	if (text.length === 0) {
+		return { json: null, text };
+	}
+	try {
+		return { json: JSON.parse(text) as unknown, text };
+	} catch {
+		return { json: null, text };
+	}
+}
+
+function copyFeedbackErrorFields(
+	source: Record<string, unknown>,
+): Record<string, unknown> {
+	const fields: Record<string, unknown> = {};
+	for (const key of [
+		"feedbackId",
+		"txHash",
+		"availableWei",
+		"requiredWei",
+		"gasLimit",
+		"maxFeePerGasWei",
+		"retryable",
+		"retryAfterSeconds",
+	]) {
+		const value = source[key];
+		if (
+			typeof value === "string" ||
+			typeof value === "number" ||
+			typeof value === "boolean"
+		) {
+			fields[key] = typeof value === "string" ? sanitise(value) : value;
+		}
+	}
+	return fields;
+}
+
 // ---- Dependency injection (test seam) -------------------------------------
 
 /**
@@ -184,6 +232,7 @@ export type McpServerDeps = {
 	provisionWallet: () => Promise<WalletConfig>;
 	loadSafetyConfig: () => Promise<SafetyConfig>;
 	checkBalance: (wallet: WalletConfig) => Promise<BalanceSnapshot>;
+	checkFeedbackGas: (wallet: WalletConfig) => Promise<FeedbackGasCheckResult>;
 	paymentSigner: PaymentSigner;
 	fetchImpl: typeof fetch;
 };
@@ -194,6 +243,7 @@ function defaultDeps(): McpServerDeps {
 		provisionWallet: () => provisionWallet(),
 		loadSafetyConfig,
 		checkBalance: (wallet) => checkBalance(wallet),
+		checkFeedbackGas: (wallet) => checkFeedbackGas(wallet),
 		paymentSigner: defaultPaymentSigner,
 		fetchImpl: globalThis.fetch,
 	};
@@ -814,6 +864,19 @@ async function handleSubmitFeedback(
 	} catch (err) {
 		return toolErrorEnvelope(err);
 	}
+	const gasCheck = await deps.checkFeedbackGas(ensured);
+	if (!gasCheck.ok) {
+		return structuredError({
+			code: gasCheck.code,
+			message: sanitise(gasCheck.message),
+			...(gasCheck.availableWei ? { availableWei: gasCheck.availableWei } : {}),
+			...(gasCheck.requiredWei ? { requiredWei: gasCheck.requiredWei } : {}),
+			...(gasCheck.gasLimit ? { gasLimit: gasCheck.gasLimit } : {}),
+			...(gasCheck.maxFeePerGasWei
+				? { maxFeePerGasWei: gasCheck.maxFeePerGasWei }
+				: {}),
+		});
+	}
 	const baseUrl = resolveKeeperhubBaseUrl();
 	const path = "/api/agentic-wallet/feedback";
 	const url = `${baseUrl}${path}`;
@@ -855,33 +918,52 @@ async function handleSubmitFeedback(
 		return toolErrorEnvelope(err);
 	}
 
-	let parsedBody: unknown;
+	let responseBody: { json: unknown; text: string };
 	try {
-		parsedBody = await response.json();
-	} catch {
-		const fallback = await response.text();
+		responseBody = await readResponseBodyOnce(response);
+	} catch (err) {
+		return toolErrorEnvelope(err);
+	}
+
+	if (!response.ok) {
+		if (!isRecord(responseBody.json)) {
+			return structuredError({
+				code: `FEEDBACK_HTTP_${response.status}`,
+				message: sanitise(
+					responseBody.text.length > 0
+						? responseBody.text.slice(0, 512)
+						: `HTTP ${response.status}`,
+				),
+			});
+		}
+		const errBody = responseBody.json;
+		const code =
+			typeof errBody.code === "string"
+				? errBody.code
+				: `FEEDBACK_HTTP_${response.status}`;
+		const message =
+			typeof errBody.error === "string"
+				? errBody.error
+				: typeof errBody.message === "string"
+					? errBody.message
+					: `HTTP ${response.status}`;
+		return structuredError({
+			code,
+			message: sanitise(message),
+			...copyFeedbackErrorFields(errBody),
+		});
+	}
+
+	if (!isRecord(responseBody.json)) {
 		return structuredError({
 			code: "FEEDBACK_UNPARSEABLE_RESPONSE",
 			message: sanitise(
-				`Server returned non-JSON ${response.status}: ${fallback.slice(0, 512)}`,
+				`Server returned non-JSON ${response.status}: ${responseBody.text.slice(0, 512)}`,
 			),
 		});
 	}
 
-	if (!response.ok) {
-		const errBody = parsedBody as {
-			error?: string;
-			code?: string;
-			feedbackId?: string;
-		};
-		return structuredError({
-			code: errBody.code ?? `FEEDBACK_HTTP_${response.status}`,
-			message: sanitise(errBody.error ?? `HTTP ${response.status}`),
-			...(errBody.feedbackId ? { feedbackId: errBody.feedbackId } : {}),
-		});
-	}
-
-	const okBody = parsedBody as {
+	const okBody = responseBody.json as {
 		feedbackId?: string;
 		txHash?: string;
 		publicUrl?: string;
@@ -984,6 +1066,7 @@ export async function runMcpServer(): Promise<void> {
 
 export const __test__ = {
 	handleCallWorkflow,
+	handleSubmitFeedback,
 	handleBalance,
 	handleInfo,
 	defaultDeps,

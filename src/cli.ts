@@ -20,6 +20,7 @@
 
 import { Command } from "commander";
 import { checkBalance } from "./balance.js";
+import { checkFeedbackGas } from "./feedback-gas.js";
 import { fund } from "./fund.js";
 import { buildHmacHeaders } from "./hmac.js";
 import { ProvisionHttpError, provisionWallet } from "./provision.js";
@@ -81,6 +82,11 @@ const FEEDBACK_DEFAULT_BASE_URL = "https://app.keeperhub.com";
 
 async function cmdFeedback(opts: FeedbackOpts): Promise<void> {
 	const wallet = await readWalletConfig();
+	const gasCheck = await checkFeedbackGas(wallet);
+	if (!gasCheck.ok) {
+		process.stderr.write(`${JSON.stringify(gasCheck)}\n`);
+		process.exit(1);
+	}
 	const baseUrl = (opts.baseUrl ?? FEEDBACK_DEFAULT_BASE_URL).replace(
 		/\/$/,
 		"",
