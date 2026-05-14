@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.14](https://github.com/KeeperHub/agentic-wallet/compare/wallet-v0.1.13...wallet-v0.1.14) (2026-05-14)
+
+
+### Bug Fixes
+
+* buffer feedback gas preflight and add force-broadcast passthrough ([fa0d280](https://github.com/KeeperHub/agentic-wallet/commit/fa0d2804ff5ee4fd7683cfc726dfc329f3d220cd))
+* preflight feedback gas before submission ([3cfcc0f](https://github.com/KeeperHub/agentic-wallet/commit/3cfcc0fc411425b42fa6d47da17a17a8d1d52b95))
+* preflight feedback gas before submission ([adcb706](https://github.com/KeeperHub/agentic-wallet/commit/adcb706491ab77f908166f85e69cd035217f0c80))
+
 ## [0.1.13](https://github.com/KeeperHub/agentic-wallet/compare/wallet-v0.1.12...wallet-v0.1.13) (2026-05-07)
 
 
