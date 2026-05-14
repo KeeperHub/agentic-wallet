@@ -757,4 +757,100 @@ describe("feedback tool", () => {
 		expect(parsed.requiredWei).toBe("5000000000000000");
 		expect(parsed.feedbackId).toBeUndefined();
 	});
+
+	it("includes forceBroadcast:true in the POST body when args set forceBroadcast", async () => {
+		const stubFetch = buildStubFetch([
+			new Response(JSON.stringify({ feedbackId: "fb_force" }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			}),
+		]);
+		const deps = buildDeps({
+			fetchImpl: stubFetch.fn,
+			checkFeedbackGas: () =>
+				Promise.resolve({
+					ok: true,
+					availableWei: "10000000000000000",
+					requiredWei: "5000000000000000",
+				}),
+		});
+
+		const result = await handleSubmitFeedback(
+			{
+				executionId: "exec_force",
+				value: 5,
+				valueDecimals: 0,
+				forceBroadcast: true,
+			},
+			deps,
+		);
+
+		expect(result.isError).toBeUndefined();
+		expect(stubFetch.calls).toHaveLength(1);
+		const sentBody = JSON.parse(
+			stubFetch.calls[0]?.init?.body as string,
+		) as Record<string, unknown>;
+		expect(sentBody.forceBroadcast).toBe(true);
+		expect(sentBody.executionId).toBe("exec_force");
+	});
+
+	it("omits forceBroadcast from the POST body when args do not set it", async () => {
+		const stubFetch = buildStubFetch([
+			new Response(JSON.stringify({ feedbackId: "fb_plain" }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			}),
+		]);
+		const deps = buildDeps({
+			fetchImpl: stubFetch.fn,
+			checkFeedbackGas: () =>
+				Promise.resolve({
+					ok: true,
+					availableWei: "10000000000000000",
+					requiredWei: "5000000000000000",
+				}),
+		});
+
+		const result = await handleSubmitFeedback(
+			{ executionId: "exec_plain", value: 5, valueDecimals: 0 },
+			deps,
+		);
+
+		expect(result.isError).toBeUndefined();
+		expect(stubFetch.calls).toHaveLength(1);
+		const sentBody = JSON.parse(
+			stubFetch.calls[0]?.init?.body as string,
+		) as Record<string, unknown>;
+		expect(sentBody).not.toHaveProperty("forceBroadcast");
+		expect(sentBody.executionId).toBe("exec_plain");
+	});
+
+	it("surfaces FEEDBACK_UNPARSEABLE_RESPONSE on an empty-body HTTP 200", async () => {
+		const stubFetch = buildStubFetch([
+			new Response("", {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			}),
+		]);
+		const deps = buildDeps({
+			fetchImpl: stubFetch.fn,
+			checkFeedbackGas: () =>
+				Promise.resolve({
+					ok: true,
+					availableWei: "10000000000000000",
+					requiredWei: "5000000000000000",
+				}),
+		});
+
+		const result = await handleSubmitFeedback(
+			{ executionId: "exec_empty_200", value: 5, valueDecimals: 0 },
+			deps,
+		);
+
+		expect(result.isError).toBe(true);
+		const parsed = parseToolJson(result.content[0]?.text ?? "");
+		expect(parsed.code).toBe("FEEDBACK_UNPARSEABLE_RESPONSE");
+		expect(typeof parsed.message).toBe("string");
+		expect(parsed.message).not.toContain("Body is unusable");
+	});
 });

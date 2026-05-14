@@ -23,7 +23,8 @@ describe("checkFeedbackGas", () => {
 		if (!result.ok) {
 			expect(result.code).toBe("INSUFFICIENT_GAS");
 			expect(result.availableWei).toBe("99");
-			expect(result.requiredWei).toBe("100");
+			// gasLimit 10 * bufferedMaxFee ((10 * 120) / 100 = 12) = 120.
+			expect(result.requiredWei).toBe("120");
 		}
 	});
 
@@ -31,7 +32,7 @@ describe("checkFeedbackGas", () => {
 		const result = await checkFeedbackGas(wallet, {
 			gasLimit: 10n,
 			client: {
-				getBalance: () => Promise.resolve(100n),
+				getBalance: () => Promise.resolve(120n),
 				estimateFeesPerGas: () =>
 					Promise.resolve({ maxFeePerGas: 10n, maxPriorityFeePerGas: 1n }),
 			} as never,
@@ -39,8 +40,9 @@ describe("checkFeedbackGas", () => {
 
 		expect(result).toMatchObject({
 			ok: true,
-			availableWei: "100",
-			requiredWei: "100",
+			availableWei: "120",
+			// gasLimit 10 * bufferedMaxFee ((10 * 120) / 100 = 12) = 120.
+			requiredWei: "120",
 		});
 	});
 
@@ -55,8 +57,32 @@ describe("checkFeedbackGas", () => {
 
 		expect(result.ok).toBe(false);
 		if (!result.ok) {
-			expect(result.requiredWei).toBe("100");
-			expect(result.maxFeePerGasWei).toBe("10");
+			// gasPrice 10 buffered to (10 * 120) / 100 = 12, * gasLimit 10 = 120.
+			expect(result.requiredWei).toBe("120");
+			expect(result.maxFeePerGasWei).toBe("12");
+		}
+	});
+
+	it("returns INSUFFICIENT_GAS when balance covers the raw estimate but not the 20% buffer", async () => {
+		// Regression guard for the EIP-1559 buffer: gasLimit 10 * raw maxFeePerGas
+		// 10 = 100 wei raw, but the buffered requirement is gasLimit 10 *
+		// ((10 * 120) / 100 = 12) = 120 wei. A balance of 110 covers the raw
+		// estimate yet must still fail once the buffer is applied.
+		const result = await checkFeedbackGas(wallet, {
+			gasLimit: 10n,
+			client: {
+				getBalance: () => Promise.resolve(110n),
+				estimateFeesPerGas: () =>
+					Promise.resolve({ maxFeePerGas: 10n, maxPriorityFeePerGas: 1n }),
+			} as never,
+		});
+
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.code).toBe("INSUFFICIENT_GAS");
+			expect(result.availableWei).toBe("110");
+			expect(result.requiredWei).toBe("120");
+			expect(result.maxFeePerGasWei).toBe("12");
 		}
 	});
 

@@ -115,4 +115,97 @@ describe("CLI feedback", () => {
 		expect(parsed.availableWei).toBe("0");
 		expect(parsed.requiredWei).toBe("5000000000000000");
 	});
+
+	it("includes forceBroadcast:true in the POST body when --force-broadcast is passed", async () => {
+		vi.mocked(checkFeedbackGas).mockResolvedValue({
+			ok: true,
+			availableWei: "10000000000000000",
+			requiredWei: "5000000000000000",
+		});
+		const fetchSpy = vi
+			.spyOn(globalThis, "fetch")
+			.mockResolvedValue(
+				new Response(JSON.stringify({ feedbackId: "fb_force" }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				}),
+			);
+		const stdio = captureStdio();
+		const exit = trapExit();
+
+		try {
+			await runCli([
+				"node",
+				"cli",
+				"feedback",
+				"--execution-id",
+				"exec_force",
+				"--value",
+				"5",
+				"--force-broadcast",
+			]);
+		} catch (err) {
+			if (!(err as Error).message?.startsWith("EXIT_")) {
+				throw err;
+			}
+		} finally {
+			stdio.restore();
+			exit.restore();
+		}
+
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		const init = fetchSpy.mock.calls[0]?.[1];
+		const sentBody = JSON.parse(init?.body as string) as Record<
+			string,
+			unknown
+		>;
+		expect(sentBody.forceBroadcast).toBe(true);
+		expect(sentBody.executionId).toBe("exec_force");
+	});
+
+	it("omits forceBroadcast from the POST body when --force-broadcast is absent", async () => {
+		vi.mocked(checkFeedbackGas).mockResolvedValue({
+			ok: true,
+			availableWei: "10000000000000000",
+			requiredWei: "5000000000000000",
+		});
+		const fetchSpy = vi
+			.spyOn(globalThis, "fetch")
+			.mockResolvedValue(
+				new Response(JSON.stringify({ feedbackId: "fb_plain" }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				}),
+			);
+		const stdio = captureStdio();
+		const exit = trapExit();
+
+		try {
+			await runCli([
+				"node",
+				"cli",
+				"feedback",
+				"--execution-id",
+				"exec_plain",
+				"--value",
+				"5",
+			]);
+		} catch (err) {
+			if (!(err as Error).message?.startsWith("EXIT_")) {
+				throw err;
+			}
+		} finally {
+			stdio.restore();
+			exit.restore();
+		}
+
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		const init = fetchSpy.mock.calls[0]?.[1];
+		const sentBody = JSON.parse(init?.body as string) as Record<
+			string,
+			unknown
+		>;
+		expect(sentBody).not.toHaveProperty("forceBroadcast");
+		expect(sentBody.executionId).toBe("exec_plain");
+	});
 });

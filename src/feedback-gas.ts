@@ -55,7 +55,11 @@ export async function checkFeedbackGas(
 		]);
 		const maxFeePerGasWei =
 			fees.maxFeePerGas ?? fees.gasPrice ?? DEFAULT_MAX_FEE_PER_GAS_WEI;
-		const requiredWei = gasLimit * maxFeePerGasWei;
+		// 20% buffer: the basefee can rise between this preflight and the
+		// server-side broadcast, so a raw maxFeePerGas estimate would
+		// under-report the gas the wallet actually needs.
+		const bufferedMaxFeePerGasWei = (maxFeePerGasWei * 120n) / 100n;
+		const requiredWei = gasLimit * bufferedMaxFeePerGasWei;
 
 		if (availableWei < requiredWei) {
 			return {
@@ -65,7 +69,7 @@ export async function checkFeedbackGas(
 				availableWei: availableWei.toString(),
 				requiredWei: requiredWei.toString(),
 				gasLimit: gasLimit.toString(),
-				maxFeePerGasWei: maxFeePerGasWei.toString(),
+				maxFeePerGasWei: bufferedMaxFeePerGasWei.toString(),
 			};
 		}
 
@@ -74,7 +78,7 @@ export async function checkFeedbackGas(
 			availableWei: availableWei.toString(),
 			requiredWei: requiredWei.toString(),
 			gasLimit: gasLimit.toString(),
-			maxFeePerGasWei: maxFeePerGasWei.toString(),
+			maxFeePerGasWei: bufferedMaxFeePerGasWei.toString(),
 		};
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);

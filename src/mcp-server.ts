@@ -843,6 +843,12 @@ const submitFeedbackInputSchema = {
 		.describe(
 			"Rated agent NFT id (uint256, decimal string). Defaults to KeeperHub's own ERC-8004 agent (31875).",
 		),
+	forceBroadcast: z
+		.boolean()
+		.optional()
+		.describe(
+			"Re-broadcast giveFeedback() for an executionId stuck with no txHash (requires server support).",
+		),
 };
 
 type SubmitFeedbackArgs = {
@@ -852,6 +858,7 @@ type SubmitFeedbackArgs = {
 	comment?: string;
 	agentChainId?: number;
 	agentId?: string;
+	forceBroadcast?: boolean;
 };
 
 async function handleSubmitFeedback(
@@ -893,6 +900,7 @@ async function handleSubmitFeedback(
 			? { agentChainId: args.agentChainId }
 			: {}),
 		...(args.agentId !== undefined ? { agentId: args.agentId } : {}),
+		...(args.forceBroadcast ? { forceBroadcast: true } : {}),
 	});
 
 	const hmacHeaders = buildHmacHeaders(
