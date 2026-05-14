@@ -39,6 +39,7 @@ import {
 
 const {
 	handleCallWorkflow,
+	handleSubmitFeedback,
 	handleBalance,
 	handleInfo,
 	BODY_TEXT_CAP_BYTES,
@@ -183,6 +184,12 @@ function buildDeps(overrides: Partial<McpServerDeps>): McpServerDeps {
 		provisionWallet: () => Promise.resolve(WALLET),
 		loadSafetyConfig: () => Promise.resolve(DEFAULT_SAFETY_CONFIG),
 		checkBalance: () => Promise.resolve(buildBalance("100.0")),
+		checkFeedbackGas: () =>
+			Promise.resolve({
+				ok: true,
+				availableWei: "10000000000000000",
+				requiredWei: "5000000000000000",
+			}),
 		paymentSigner: stubSigner.signer,
 		fetchImpl: stubFetch.fn,
 		...overrides,
@@ -622,5 +629,228 @@ describe("call_workflow tool — body cap", () => {
 		// utf-8 byteLength of the string == length here because everything is
 		// 1-byte ASCII.
 		expect(Buffer.byteLength(bodyText, "utf-8")).toBe(BODY_TEXT_CAP_BYTES);
+	});
+});
+
+describe("feedback tool", () => {
+	it("preflights mainnet gas before POSTing feedback to the server", async () => {
+		const fetchImpl = vi.fn(() =>
+			Promise.resolve(new Response("should not be called", { status: 200 })),
+		) as unknown as typeof fetch;
+
+		const deps = buildDeps({
+			fetchImpl,
+			checkFeedbackGas: () =>
+				Promise.resolve({
+					ok: false,
+					code: "INSUFFICIENT_GAS",
+					message:
+						"Wallet has 0 wei on Ethereum mainnet; feedback requires about 5000000000000000 wei for gas.",
+					availableWei: "0",
+					requiredWei: "5000000000000000",
+				}),
+		});
+
+		const result = await handleSubmitFeedback(
+			{ executionId: "exec_low_gas", value: 5, valueDecimals: 0 },
+			deps,
+		);
+
+		expect(result.isError).toBe(true);
+		const parsed = parseToolJson(result.content[0]?.text ?? "");
+		expect(parsed.code).toBe("INSUFFICIENT_GAS");
+		expect(parsed.availableWei).toBe("0");
+		expect(parsed.requiredWei).toBe("5000000000000000");
+		expect(fetchImpl).not.toHaveBeenCalled();
+	});
+
+	it("surfaces feedback gas preflight RPC failures without mutating server state", async () => {
+		const fetchImpl = vi.fn(() =>
+			Promise.resolve(new Response("should not be called", { status: 200 })),
+		) as unknown as typeof fetch;
+
+		const deps = buildDeps({
+			fetchImpl,
+			checkFeedbackGas: () =>
+				Promise.resolve({
+					ok: false,
+					code: "FEEDBACK_GAS_CHECK_FAILED",
+					message: "Unable to check Ethereum mainnet gas balance: RPC down",
+				}),
+		});
+
+		const result = await handleSubmitFeedback(
+			{ executionId: "exec_rpc_down", value: 5, valueDecimals: 0 },
+			deps,
+		);
+
+		expect(result.isError).toBe(true);
+		const parsed = parseToolJson(result.content[0]?.text ?? "");
+		expect(parsed.code).toBe("FEEDBACK_GAS_CHECK_FAILED");
+		expect(parsed.message).toContain("RPC down");
+		expect(fetchImpl).not.toHaveBeenCalled();
+	});
+
+	it("does not double-read non-JSON feedback error responses", async () => {
+		const deps = buildDeps({
+			checkFeedbackGas: () =>
+				Promise.resolve({
+					ok: true,
+					availableWei: "10000000000000000",
+					requiredWei: "5000000000000000",
+				}),
+			fetchImpl: () =>
+				Promise.resolve(
+					new Response("upstream broadcast failed before tx submission", {
+						status: 502,
+						headers: { "content-type": "text/plain" },
+					}),
+				),
+		});
+
+		const result = await handleSubmitFeedback(
+			{ executionId: "exec_rpc_error", value: 5, valueDecimals: 0 },
+			deps,
+		);
+
+		expect(result.isError).toBe(true);
+		const parsed = parseToolJson(result.content[0]?.text ?? "");
+		expect(parsed.code).toBe("FEEDBACK_HTTP_502");
+		expect(parsed.message).toContain("upstream broadcast failed");
+		expect(parsed.message).not.toContain("Body is unusable");
+	});
+
+	it("preserves structured insufficient-gas fields from the feedback API", async () => {
+		const deps = buildDeps({
+			checkFeedbackGas: () =>
+				Promise.resolve({
+					ok: true,
+					availableWei: "10000000000000000",
+					requiredWei: "5000000000000000",
+				}),
+			fetchImpl: () =>
+				Promise.resolve(
+					new Response(
+						JSON.stringify({
+							code: "INSUFFICIENT_GAS",
+							error: "Wallet needs more ETH for mainnet gas",
+							availableWei: "0",
+							requiredWei: "5000000000000000",
+						}),
+						{
+							status: 402,
+							headers: { "content-type": "application/json" },
+						},
+					),
+				),
+		});
+
+		const result = await handleSubmitFeedback(
+			{ executionId: "exec_server_low_gas", value: 5, valueDecimals: 0 },
+			deps,
+		);
+
+		expect(result.isError).toBe(true);
+		const parsed = parseToolJson(result.content[0]?.text ?? "");
+		expect(parsed.code).toBe("INSUFFICIENT_GAS");
+		expect(parsed.availableWei).toBe("0");
+		expect(parsed.requiredWei).toBe("5000000000000000");
+		expect(parsed.feedbackId).toBeUndefined();
+	});
+
+	it("includes forceBroadcast:true in the POST body when args set forceBroadcast", async () => {
+		const stubFetch = buildStubFetch([
+			new Response(JSON.stringify({ feedbackId: "fb_force" }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			}),
+		]);
+		const deps = buildDeps({
+			fetchImpl: stubFetch.fn,
+			checkFeedbackGas: () =>
+				Promise.resolve({
+					ok: true,
+					availableWei: "10000000000000000",
+					requiredWei: "5000000000000000",
+				}),
+		});
+
+		const result = await handleSubmitFeedback(
+			{
+				executionId: "exec_force",
+				value: 5,
+				valueDecimals: 0,
+				forceBroadcast: true,
+			},
+			deps,
+		);
+
+		expect(result.isError).toBeUndefined();
+		expect(stubFetch.calls).toHaveLength(1);
+		const sentBody = JSON.parse(
+			stubFetch.calls[0]?.init?.body as string,
+		) as Record<string, unknown>;
+		expect(sentBody.forceBroadcast).toBe(true);
+		expect(sentBody.executionId).toBe("exec_force");
+	});
+
+	it("omits forceBroadcast from the POST body when args do not set it", async () => {
+		const stubFetch = buildStubFetch([
+			new Response(JSON.stringify({ feedbackId: "fb_plain" }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			}),
+		]);
+		const deps = buildDeps({
+			fetchImpl: stubFetch.fn,
+			checkFeedbackGas: () =>
+				Promise.resolve({
+					ok: true,
+					availableWei: "10000000000000000",
+					requiredWei: "5000000000000000",
+				}),
+		});
+
+		const result = await handleSubmitFeedback(
+			{ executionId: "exec_plain", value: 5, valueDecimals: 0 },
+			deps,
+		);
+
+		expect(result.isError).toBeUndefined();
+		expect(stubFetch.calls).toHaveLength(1);
+		const sentBody = JSON.parse(
+			stubFetch.calls[0]?.init?.body as string,
+		) as Record<string, unknown>;
+		expect(sentBody).not.toHaveProperty("forceBroadcast");
+		expect(sentBody.executionId).toBe("exec_plain");
+	});
+
+	it("surfaces FEEDBACK_UNPARSEABLE_RESPONSE on an empty-body HTTP 200", async () => {
+		const stubFetch = buildStubFetch([
+			new Response("", {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			}),
+		]);
+		const deps = buildDeps({
+			fetchImpl: stubFetch.fn,
+			checkFeedbackGas: () =>
+				Promise.resolve({
+					ok: true,
+					availableWei: "10000000000000000",
+					requiredWei: "5000000000000000",
+				}),
+		});
+
+		const result = await handleSubmitFeedback(
+			{ executionId: "exec_empty_200", value: 5, valueDecimals: 0 },
+			deps,
+		);
+
+		expect(result.isError).toBe(true);
+		const parsed = parseToolJson(result.content[0]?.text ?? "");
+		expect(parsed.code).toBe("FEEDBACK_UNPARSEABLE_RESPONSE");
+		expect(typeof parsed.message).toBe("string");
+		expect(parsed.message).not.toContain("Body is unusable");
 	});
 });

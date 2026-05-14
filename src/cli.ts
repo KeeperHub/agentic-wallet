@@ -20,6 +20,7 @@
 
 import { Command } from "commander";
 import { checkBalance } from "./balance.js";
+import { checkFeedbackGas } from "./feedback-gas.js";
 import { fund } from "./fund.js";
 import { buildHmacHeaders } from "./hmac.js";
 import { ProvisionHttpError, provisionWallet } from "./provision.js";
@@ -75,12 +76,18 @@ type FeedbackOpts = {
 	agentId?: string;
 	chainId?: string;
 	baseUrl?: string;
+	forceBroadcast?: boolean;
 };
 
 const FEEDBACK_DEFAULT_BASE_URL = "https://app.keeperhub.com";
 
 async function cmdFeedback(opts: FeedbackOpts): Promise<void> {
 	const wallet = await readWalletConfig();
+	const gasCheck = await checkFeedbackGas(wallet);
+	if (!gasCheck.ok) {
+		process.stderr.write(`${JSON.stringify(gasCheck)}\n`);
+		process.exit(1);
+	}
 	const baseUrl = (opts.baseUrl ?? FEEDBACK_DEFAULT_BASE_URL).replace(
 		/\/$/,
 		"",
@@ -102,6 +109,9 @@ async function cmdFeedback(opts: FeedbackOpts): Promise<void> {
 	}
 	if (opts.chainId !== undefined) {
 		body.agentChainId = Number.parseInt(opts.chainId, 10);
+	}
+	if (opts.forceBroadcast) {
+		body.forceBroadcast = true;
 	}
 	const bodyJson = JSON.stringify(body);
 
@@ -204,6 +214,10 @@ export async function runCli(argv: string[] = process.argv): Promise<void> {
 			"agent chain id; defaults to 1 (Ethereum mainnet, only chain supported today)",
 		)
 		.option("--base-url <url>", "KeeperHub API base URL")
+		.option(
+			"--force-broadcast",
+			"re-broadcast giveFeedback() for an executionId stuck with no txHash (requires server support)",
+		)
 		.action(async (opts: FeedbackOpts) => {
 			await cmdFeedback(opts);
 		});
