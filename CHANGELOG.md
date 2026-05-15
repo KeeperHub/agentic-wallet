@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.15](https://github.com/KeeperHub/agentic-wallet/compare/wallet-v0.1.14...wallet-v0.1.15) (2026-05-15)
+
+
+### Bug Fixes
+
+* override fast-uri to ^3.1.2 to clear the publish audit gate ([857d98a](https://github.com/KeeperHub/agentic-wallet/commit/857d98a40e2feac2d25aa5a3fc8b6deded703961))
+* override fast-uri to ^3.1.2 to clear the publish audit gate ([f4f8c06](https://github.com/KeeperHub/agentic-wallet/commit/f4f8c0627a712a11c2279bc9751f3008b9634f0d))
+
 ## [0.1.14](https://github.com/KeeperHub/agentic-wallet/compare/wallet-v0.1.13...wallet-v0.1.14) (2026-05-14)
 
 
