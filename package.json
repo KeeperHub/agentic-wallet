@@ -55,5 +55,10 @@
 		"tsup": "8.5.1",
 		"typescript": "5.9.2",
 		"vitest": "4.1.2"
+	},
+	"pnpm": {
+		"overrides": {
+			"fast-uri": "^3.1.2"
+		}
 	}
 }
