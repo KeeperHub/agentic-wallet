@@ -42,11 +42,13 @@ npx -p @keeperhub/wallet keeperhub-wallet skill install
 
 `skill install` does three things, idempotently:
 
-1. Writes the `keeperhub-wallet` skill file into every detected agent's skills directory (Claude Code, Cursor, Windsurf, OpenCode auto-detected; Cline emits a copy-paste notice).
-2. Registers the `keeperhub-wallet-hook` PreToolUse safety hook in `~/.claude/settings.json`.
-3. Registers the `keeperhub-wallet` stdio MCP server in each detected agent's MCP config.
+1. Writes the `keeperhub-wallet` skill file into every detected agent's skills directory (Claude Code, Cursor, Cline, Windsurf, and OpenCode).
+2. Registers the `keeperhub-wallet-hook` PreToolUse safety hook for Claude Code; other detected agents receive an explicit notice because their hook formats are not auto-configured.
+3. Registers the `keeperhub-wallet` stdio MCP server for Claude Code, Cursor, Windsurf, and OpenCode; Cline receives the exact manual-registration command.
 
 On the very first tool call the server provisions a fresh wallet automatically into `~/.keeperhub/wallet.json` — there is no manual `add` step. The provisioned wallet starts at zero balance; the first 402 round-trip surfaces `INSUFFICIENT_FUNDS` with a Coinbase Onramp URL.
+
+The `keeperhub-wallet add` command remains available for manual setup. It is idempotent: if a valid local config already exists, it reports and keeps that wallet without making a provisioning request. Use `keeperhub-wallet add --force-new` only when you intentionally want to replace the local config; the previous wallet may still hold funds.
 
 ---
 
@@ -103,9 +105,9 @@ The agent calls `feedback({ executionId, value: 5, valueDecimals: 0 })`. The wal
 
 ## Reality check
 
-This wallet pays **KeeperHub-listed workflows** at `/api/mcp/workflows/<slug>/call` URLs. Generic non-KH x402 endpoints throw `UNSUPPORTED_RECIPIENT` today — that's deferred until per-call principal-authorization (AP2) lands. If you want a thin x402 client for arbitrary endpoints, look at [`x402-fetch`](https://www.npmjs.com/package/x402-fetch) or [`agent-discovery-mcp`](https://github.com/Claynsn/agent-discovery-mcp).
+This wallet pays **KeeperHub-listed workflows** at `/api/mcp/workflows/<slug>/call` URLs. Generic non-KeeperHub x402 or MPP endpoints throw `UNSUPPORTED_RECIPIENT` today — that's deferred until per-call principal-authorization (AP2) lands. If you want a thin x402 client for arbitrary endpoints, look at [`x402-fetch`](https://www.npmjs.com/package/x402-fetch) or [`agent-discovery-mcp`](https://github.com/Claynsn/agent-discovery-mcp).
 
-What you get instead: every payment is workflow-slug-bound, gated by a configurable PreToolUse policy, and produces an onchain audit trail. Pick this client when the workflow + payment + outcome need to be linked in one verifiable record.
+What you get instead: every payment is workflow-slug-bound, subject to local safety checks and the server-side signing policy, and produces an onchain audit trail. Pick this client when the workflow + payment + outcome need to be linked in one verifiable record.
 
 ---
 
@@ -192,7 +194,10 @@ The PreToolUse hook intercepts every MCP call whose name/args look like a paymen
   "auto_approve_max_usd": 5,
   "ask_threshold_usd": 50,
   "block_threshold_usd": 100,
-  "address_allowlist": []
+  "allowlisted_contracts": [
+    "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+    "0x20c000000000000000000000b9537d11c60e8b50"
+  ]
 }
 ```
 
@@ -200,7 +205,11 @@ The PreToolUse hook intercepts every MCP call whose name/args look like a paymen
 - `> block_threshold_usd` → deny inline.
 - Anything in between → defer to the user.
 
-Defaults are conservative. Edit the file on disk and restart the host; the hook re-reads on every fire.
+`ask_threshold_usd` remains in the file for backward compatibility and validation; the current three-tier hook treats the full interval between the auto-approve and block thresholds as `ask`.
+
+The contract list is a local client-side guard, not a way to expand KeeperHub's signing capabilities. Removing entries can make the local policy stricter. Adding an entry only changes the local hook and does **not** widen the server-side Turnkey allowlist, enable a new asset, or make arbitrary x402/MPP endpoints supported.
+
+Defaults are conservative. Edit the file on disk and restart the host; the hook re-reads the file on each invocation.
 
 ---
 

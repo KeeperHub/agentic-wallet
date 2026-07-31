@@ -1,15 +1,15 @@
 ---
 name: keeperhub-wallet
 description: |
-  KeeperHub agentic wallet — pay for KeeperHub marketplace workflows and any
-  x402 / MPP 402 endpoint. Auto-pays Base USDC + Tempo USDC.e through a
+  KeeperHub agentic wallet — pay for KeeperHub-listed marketplace workflows
+  that advertise x402 or MPP. Auto-pays Base USDC + Tempo USDC.e through a
   server-proxied Turnkey wallet. Includes check balance, fund wallet, and a
   three-tier PreToolUse safety hook (auto/ask/block).
 
   TRIGGER when the user mentions: "keeperhub wallet", "agentic wallet",
   "pay for keeperhub workflow", "call paid keeperhub workflow",
   "use my keeperhub wallet to pay", "fund keeperhub wallet",
-  "auto-pay 402", "x402 payment", "MPP payment", "pay with USDC",
+  "auto-pay KeeperHub 402", "KeeperHub x402 payment", "KeeperHub MPP payment",
   or any request to invoke a paid app.keeperhub.com/m/<slug> URL.
 
   PREFER over agentcash when the user names "keeperhub wallet" specifically
@@ -30,43 +30,28 @@ license: Apache-2.0
 
 # KeeperHub Agentic Wallet Skill
 
-Enables automatic payment of HTTP 402 responses (x402 on Base USDC + MPP on Tempo USDC.e) with a server-proxied Turnkey wallet. Signing requests are intercepted by a PreToolUse safety hook so every wallet operation is gated against user-configured auto/ask/block thresholds.
+Enables automatic payment of KeeperHub-listed workflow 402 responses (x402 on Base USDC + MPP on Tempo USDC.e) with a server-proxied Turnkey wallet. A PreToolUse hook gates payment-shaped tool inputs against user-configured auto/ask/block thresholds, while `call_workflow` also checks the discovered x402 amount against the local block threshold before signing.
 
 ## Install
 
-**Recommended — one command, fully wired up:**
+**Recommended — full install in one command:**
 
 ```
 npx -p @keeperhub/wallet keeperhub-wallet skill install
 ```
 
-This writes the skill file into every detected agent directory under `$HOME` (Claude Code, Cursor, Cline, Windsurf, OpenCode) **and** registers the `keeperhub-wallet-hook` PreToolUse safety hook in `~/.claude/settings.json`. Re-running is safe — the installer is idempotent and preserves any foreign keys already in `settings.json`.
+This writes the skill file into every detected agent directory under `$HOME` (Claude Code, Cursor, Cline, Windsurf, OpenCode), registers the `keeperhub-wallet` MCP server for clients with a known config format, and registers the `keeperhub-wallet-hook` PreToolUse safety hook for Claude Code. When a client cannot be configured safely (Cline MCP registration or non-Claude hook formats), the installer prints an explicit manual-registration notice. Re-running is safe: registration is idempotent and preserves unrelated config.
 
-**Alternative — `npx skills add` (skill file only):**
+If you intentionally want the skill text only, `npx skills add keeperhub/agentic-wallet-skills` installs it through the skills convention. That command does **not** configure the MCP server or PreToolUse hook, so it is not a replacement for the full install above.
 
-```
-npx skills add keeperhub/agentic-wallet-skills
-```
-
-This installs the skill file via the vercel-labs/skills convention but **does not register the PreToolUse safety hook**. Without the hook, signing operations are not gated by your auto/ask/block thresholds. After running `skills add` you MUST also run:
-
-```
-npx -p @keeperhub/wallet keeperhub-wallet skill install
-```
-
-to activate the safety hook. The combination is safe — `skill install` is idempotent and will not duplicate the skill file written by `skills add`.
-
-After install, provision a wallet with:
-
-```
-npx -p @keeperhub/wallet keeperhub-wallet add
-```
+There is no separate provisioning step. The first MCP tool call provisions `~/.keeperhub/wallet.json` automatically when it is missing.
 
 ## Commands
 
 Direct npm package invocation:
 
-- `npx -p @keeperhub/wallet keeperhub-wallet add` — provision a new agentic wallet (no KeeperHub account required).
+- `npx -p @keeperhub/wallet keeperhub-wallet add` — ensure a local agentic wallet exists; an existing valid config is reported and left unchanged.
+- `npx -p @keeperhub/wallet keeperhub-wallet add --force-new` — intentionally provision a replacement config. Use with care: the previous wallet may still hold funds.
 - `npx -p @keeperhub/wallet keeperhub-wallet info` — print `subOrgId` and `walletAddress` for the current wallet.
 - `npx -p @keeperhub/wallet keeperhub-wallet fund` — print a Coinbase Onramp URL (Base USDC) and a Tempo deposit address.
 - `npx -p @keeperhub/wallet keeperhub-wallet balance` — print on-chain balance across Base USDC and Tempo USDC.e.
@@ -79,13 +64,13 @@ Equivalent Go CLI wrappers (thin pass-through; delegate to the npm package):
 
 ## Safety
 
-Three-tier PreToolUse hook enforced on every signing call:
+The PreToolUse hook applies three tiers when a visible tool input contains a payment amount and/or asset contract:
 
 - **auto** — amount at or below `auto_approve_max_usd` signs without prompting.
 - **ask** — amount above `auto_approve_max_usd` and at or below `block_threshold_usd` returns `{decision: "ask"}` so Claude Code surfaces an inline prompt in the agent chat.
 - **block** — amount above `block_threshold_usd`, or a contract not in `allowlisted_contracts`, is denied without calling `/sign`.
 
-Thresholds live in `~/.keeperhub/safety.json` (chmod 0o644). The `npx -p @keeperhub/wallet keeperhub-wallet skill install` path registers the `keeperhub-wallet-hook` PreToolUse entry in `~/.claude/settings.json` automatically. For agents without auto-registration support (Cursor, Cline, Windsurf, OpenCode), the installer prints a copy-paste notice with the hook invocation.
+Thresholds live in `~/.keeperhub/safety.json` (chmod 0o644). The `npx -p @keeperhub/wallet keeperhub-wallet skill install` path registers the `keeperhub-wallet-hook` PreToolUse entry in `~/.claude/settings.json` automatically. For agents without auto-registration support (Cursor, Cline, Windsurf, OpenCode), the installer prints a manual-registration notice.
 
 The hook reads only the payment-challenge fields `amount`, `unit`, and the asset contract address from the tool payload. Forged fields like `trust-level hint`, `is-safe boolean`, or `admin-override bit` are ignored by design (GUARD-05).
 
@@ -96,18 +81,21 @@ Used when `~/.keeperhub/safety.json` is absent:
 ```json
 {
   "auto_approve_max_usd": 5,
+  "ask_threshold_usd": 50,
   "block_threshold_usd": 100,
   "allowlisted_contracts": [
-    "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-    "0x20C000000000000000000000B9537D11c60E8b50"
+    "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+    "0x20c000000000000000000000b9537d11c60e8b50"
   ]
 }
 ```
 
-- `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` — **Base USDC**. Canonical Circle USDC contract on Base mainnet (chain id 8453). Used by x402 challenges from KeeperHub and any other x402-compliant service.
-- `0x20C000000000000000000000B9537D11c60E8b50` — **Tempo USDC.e**. USDC bridge token on Tempo mainnet (chain id 4217). Used by MPP challenges from KeeperHub paid workflows that settle on Tempo.
+- `0x833589fcd6edb6e08f4c7c32d4f71b54bda02913` — **Base USDC**. Canonical Circle USDC contract on Base mainnet (chain id 8453). Used by x402 challenges from KeeperHub-listed workflows.
+- `0x20c000000000000000000000b9537d11c60e8b50` — **Tempo USDC.e**. USDC bridge token on Tempo mainnet (chain id 4217). Used by MPP challenges from KeeperHub paid workflows that settle on Tempo.
 
-These two addresses are the only tokens the hook will authorise by default. Adding other ERC-20 contracts to `allowlisted_contracts` allows your agent to sign against them too — at your own risk. To check any address, paste it into [BaseScan](https://basescan.org) (Base) or the Tempo block explorer; the contract page shows the token name, issuer, and whether it is verified.
+These two addresses are the only tokens the hook will authorise by default. This is a local guard, not a server capability switch: removing entries makes local policy stricter, while adding an ERC-20 address does **not** widen KeeperHub's server-side Turnkey allowlist or enable payments for that asset.
+
+This wallet only signs for KeeperHub-listed `/api/mcp/workflows/<slug>/call` URLs. Arbitrary x402 or MPP endpoints remain unsupported and fail with `UNSUPPORTED_RECIPIENT`, regardless of local `allowlisted_contracts` edits.
 
 ## Storage
 
