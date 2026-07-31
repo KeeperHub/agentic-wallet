@@ -1,7 +1,8 @@
 // CLI dispatcher for `npx @keeperhub/wallet <cmd>`. Ships 4 subcommands:
-// add (provision -- NO auth), fund (pure string-build Coinbase Onramp +
-// Tempo address), balance (Base USDC + Tempo USDC.e), info (print subOrgId
-// + walletAddress from ~/.keeperhub/wallet.json).
+// add (ensure a wallet exists; --force-new explicitly reprovisions), fund
+// (pure string-build Coinbase Onramp + Tempo address), balance (Base USDC +
+// Tempo USDC.e), info (print subOrgId + walletAddress from
+// ~/.keeperhub/wallet.json).
 //
 // v0.1.4 removed the `link` subcommand. /api/agentic-wallet/link still
 // exists server-side but the UX (copy-paste session cookie) was not fit
@@ -26,15 +27,41 @@ import { buildHmacHeaders } from "./hmac.js";
 import { ProvisionHttpError, provisionWallet } from "./provision.js";
 import { installSkill } from "./skill-install.js";
 import { getWalletConfigPath, readWalletConfig } from "./storage.js";
-import { WalletConfigMissingError } from "./types.js";
+import { type WalletConfig, WalletConfigMissingError } from "./types.js";
 
-async function cmdAdd(opts: { baseUrl?: string } = {}): Promise<void> {
+type AddOptions = {
+	baseUrl?: string;
+	forceNew?: boolean;
+};
+
+function printPublicWalletFields(data: WalletConfig): void {
+	// Intentionally print only public fields. The hmacSecret is never printed
+	// -- T-34-cli-02 mitigation.
+	process.stdout.write(`subOrgId: ${data.subOrgId}\n`);
+	process.stdout.write(`walletAddress: ${data.walletAddress}\n`);
+}
+
+async function cmdAdd(opts: AddOptions = {}): Promise<void> {
 	try {
+		if (!opts.forceNew) {
+			try {
+				const existing = await readWalletConfig();
+				printPublicWalletFields(existing);
+				process.stdout.write(
+					`config already exists at ${getWalletConfigPath()}; keeping existing wallet (use --force-new to intentionally replace it)\n`,
+				);
+				return;
+			} catch (err) {
+				if (!(err instanceof WalletConfigMissingError)) {
+					// An existing but corrupt config must fail closed. Replacing it
+					// requires the caller's explicit --force-new choice.
+					throw err;
+				}
+			}
+		}
+
 		const data = await provisionWallet({ baseUrl: opts.baseUrl });
-		// Intentionally print only public fields. The hmacSecret is written to
-		// wallet.json (chmod 0o600) but never printed -- T-34-cli-02 mitigation.
-		process.stdout.write(`subOrgId: ${data.subOrgId}\n`);
-		process.stdout.write(`walletAddress: ${data.walletAddress}\n`);
+		printPublicWalletFields(data);
 		process.stdout.write(`config written to ${getWalletConfigPath()}\n`);
 	} catch (err) {
 		if (err instanceof ProvisionHttpError) {
@@ -157,9 +184,15 @@ export async function runCli(argv: string[] = process.argv): Promise<void> {
 
 	program
 		.command("add")
-		.description("Provision a new agentic wallet (no account required)")
+		.description(
+			"Ensure a local agentic wallet exists (no account required)",
+		)
 		.option("--base-url <url>", "KeeperHub API base URL")
-		.action(async (opts: { baseUrl?: string }) => {
+		.option(
+			"--force-new",
+			"provision a new wallet even when local config exists (the old wallet may still hold funds)",
+		)
+		.action(async (opts: AddOptions) => {
 			await cmdAdd(opts);
 		});
 
