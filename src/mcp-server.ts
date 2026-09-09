@@ -800,6 +800,81 @@ async function handleInfo(deps: McpServerDeps): Promise<ToolResult> {
 	});
 }
 
+// ---- describe_workflow (KEEP-436) ---------------------------------------
+
+const describeWorkflowInputSchema = {
+	slug: z.string().min(1).describe("KeeperHub workflow slug"),
+};
+
+type DescribeWorkflowArgs = {
+	slug: string;
+};
+
+/**
+ * Pre-execution, payment-free probe of a workflow (KEEP-436).
+ *
+ * Issues the SAME empty-body POST probe that `call_workflow` sends to read
+ * the 402 challenge, but stops after parsing it — no wallet is provisioned
+ * and no USDC moves. Surfaces whether the workflow requires payment, its
+ * price in USD (lowest x402 `accepts[]` amount), and its auth mode
+ * (x402 vs MPP). Reuses the exact challenge-parsing helpers `call_workflow`
+ * already depends on, so there is no new network path and no payment side
+ * effect.
+ *
+ * The input schema is intentionally NOT returned: the 402 challenge does
+ * not carry it. If KeeperHub later exposes a public
+ * `GET /api/mcp/workflows/<slug>` metadata route, this handler can read
+ * schema from there without a contract change.
+ */
+async function handleDescribeWorkflow(
+	args: DescribeWorkflowArgs,
+	deps: McpServerDeps,
+): Promise<ToolResult> {
+	const baseUrl = resolveKeeperhubBaseUrl();
+	const url = `${baseUrl}/api/mcp/workflows/${encodeURIComponent(args.slug)}/call`;
+	let probe: Response;
+	try {
+		probe = await deps.fetchImpl(url, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: "{}",
+			signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+		});
+	} catch (err) {
+		return toolErrorEnvelope(err);
+	}
+
+	if (probe.status === 402) {
+		const x402 = await parseX402Challenge(probe);
+		const mpp = parseMppChallenge(probe);
+		const amountMicro = extractX402AmountMicro(x402);
+		const result: Record<string, unknown> = {
+			slug: args.slug,
+			requiresPayment: true,
+			authMode: x402 ? "x402" : mpp ? "mpp" : "unknown",
+		};
+		if (amountMicro !== null) {
+			result.priceUsd = microUsdcToUsd(amountMicro);
+		}
+		return structuredOk(result);
+	}
+
+	if (probe.ok) {
+		return structuredOk({
+			slug: args.slug,
+			requiresPayment: false,
+			authMode: "none",
+		});
+	}
+
+	return structuredError({
+		code: `DESCRIBE_HTTP_${probe.status}`,
+		message: sanitise(
+			`describe_workflow probe returned HTTP ${probe.status}`,
+		),
+	});
+}
+
 // ---- submit_feedback -----------------------------------------------------
 
 const submitFeedbackInputSchema = {
@@ -1048,6 +1123,19 @@ export function buildMcpServer(options: BuildMcpServerOptions = {}): McpServer {
 			),
 	);
 
+	server.registerTool(
+		"describe_workflow",
+		{
+			description:
+				"Pre-execution, payment-free probe of a KeeperHub workflow (KEEP-436). Returns whether the workflow requires payment, its price in USD (from the x402 challenge), and its auth mode (x402 or MPP) — WITHOUT provisioning a wallet or moving any USDC. Use this to let an agent decide whether to call `call_workflow` before any payment side effect. Does not return the input schema (the 402 challenge does not carry it); run call_workflow to see the full schema.",
+			inputSchema: describeWorkflowInputSchema,
+		},
+		async (args) =>
+			await withToolLogging("describe_workflow", () =>
+				handleDescribeWorkflow(args, deps),
+			),
+	);
+
 	return server;
 }
 
@@ -1077,6 +1165,7 @@ export const __test__ = {
 	handleSubmitFeedback,
 	handleBalance,
 	handleInfo,
+	handleDescribeWorkflow,
 	defaultDeps,
 	resetProvisionInflightForTests,
 	BODY_TEXT_CAP_BYTES,
